@@ -1,79 +1,121 @@
 import uuid
 
-# Initialize product database
 def init_product_db():
+    """Initialize product database with sample products and their tasks"""
     return {
-        'Sepatu Kulit': {
+        'Standing Acrylic T': {
             'tasks': [
-                {'id': 'SK1', 'name': 'Potong Sol', 'duration': 2, 'sequence': 1, 'attributes': {'cutting': 90, 'precision': 70, 'stamina': 60}, 'output_code': 'SOL-SK', 'requirements': []},
-                {'id': 'SK2', 'name': 'Jahit Badan', 'duration': 3, 'sequence': 2, 'attributes': {'sewing': 85, 'precision': 80, 'stamina': 50}, 'output_code': 'BDN-SK', 'requirements': []},
-                {'id': 'SK3', 'name': 'Tempel Sol & Badan', 'duration': 2, 'sequence': 3, 'attributes': {'gluing': 75, 'assembly': 70, 'stamina': 60}, 'output_code': 'ASM-SK', 'requirements': ['SOL-SK', 'BDN-SK']},
-                {'id': 'SK4', 'name': 'Pasang Tali', 'duration': 1, 'sequence': 4, 'attributes': {'finishing': 60, 'precision': 65, 'stamina': 40}, 'output_code': 'FIN-SK', 'requirements': ['ASM-SK']},
-                {'id': 'SK5', 'name': 'Quality Check', 'duration': 1, 'sequence': 5, 'attributes': {'inspection': 90, 'attention': 85, 'stamina': 30}, 'output_code': 'QC-SK', 'requirements': ['FIN-SK']}
+                {'id': 'ST1', 'name': 'Opening the masking paper', 'duration': 1, 'sequence': 1, 
+                 'attributes': {'open_paper': 100, 'quality_control': 90, 'gluing': 50, 'bending': 30, 'assembling': 30, 'edge_scrap': 70}, 
+                 'output_code': 'ST1-OUT', 'requirements': []},
+                {'id': 'ST2', 'name': 'Unsharp/scrap the edge of the acrylic sheet', 'duration': 1, 'sequence': 2, 
+                 'attributes': {'edge_scrap': 100, 'quality_control': 90, 'open_paper': 60, 'gluing': 45, 'bending': 20, 'assembling': 30}, 
+                 'output_code': 'ST2-OUT', 'requirements': []},
+                {'id': 'ST3', 'name': '1st step - top bending fold', 'duration': 1, 'sequence': 3, 
+                 'attributes': {'bending': 100, 'gluing': 50, 'assembling': 40, 'quality_control': 40, 'open_paper': 20, 'edge_scrap': 20}, 
+                 'output_code': 'ST3-OUT', 'requirements': ['ST1-OUT', 'ST2-OUT']},
+                {'id': 'ST4', 'name': '2nd step - 1st foot side 90 degrees bending', 'duration': 1, 'sequence': 4, 
+                 'attributes': {'bending': 100, 'quality_control': 40, 'open_paper': 40, 'gluing': 40, 'assembling': 30, 'edge_scrap': 10}, 
+                 'output_code': 'ST4-OUT', 'requirements': ['ST3-OUT']},
+                {'id': 'ST5', 'name': '3rd step - 2nd foot side 90 degrees bending', 'duration': 1, 'sequence': 5, 
+                 'attributes': {'bending': 100, 'quality_control': 40, 'open_paper': 40, 'gluing': 40, 'assembling': 30, 'edge_scrap': 10}, 
+                 'output_code': 'ST5-OUT', 'requirements': ['ST4-OUT']},
+                {'id': 'ST6', 'name': 'QC-bending results and putting it in box', 'duration': 1, 'sequence': 6, 
+                 'attributes': {'quality_control': 100, 'open_paper': 80, 'edge_scrap': 30, 'bending': 20, 'gluing': 10, 'assembling': 10}, 
+                 'output_code': 'ST6-OUT', 'requirements': ['ST5-OUT']}
             ]
         },
-        'Sandal Eva': {
+        'Standing Acrylic L': {
             'tasks': [
-                {'id': 'SE1', 'name': 'Potong Eva Foam', 'duration': 1, 'sequence': 1, 'attributes': {'cutting': 85, 'precision': 65, 'stamina': 50}, 'output_code': 'EVA-SE', 'requirements': []},
-                {'id': 'SE2', 'name': 'Cetak Mold', 'duration': 2, 'sequence': 2, 'attributes': {'molding': 90, 'precision': 70, 'stamina': 60}, 'output_code': 'MLD-SE', 'requirements': ['EVA-SE']},
-                {'id': 'SE3', 'name': 'Pasang Tali', 'duration': 2, 'sequence': 3, 'attributes': {'assembly': 75, 'precision': 65, 'stamina': 45}, 'output_code': 'ASM-SE', 'requirements': ['MLD-SE']},
-                {'id': 'SE4', 'name': 'Quality Check', 'duration': 1, 'sequence': 4, 'attributes': {'inspection': 85, 'attention': 80, 'stamina': 30}, 'output_code': 'QC-SE', 'requirements': ['ASM-SE']}
-            ]
-        },
-        'Tas Wanita': {
-            'tasks': [
-                {'id': 'TW1', 'name': 'Potong Kain', 'duration': 2, 'sequence': 1, 'attributes': {'cutting': 80, 'precision': 75, 'stamina': 55}, 'output_code': 'KAI-TW', 'requirements': []},
-                {'id': 'TW2', 'name': 'Jahit Badan Tas', 'duration': 4, 'sequence': 2, 'attributes': {'sewing': 90, 'precision': 85, 'stamina': 70}, 'output_code': 'BDN-TW', 'requirements': ['KAI-TW']},
-                {'id': 'TW3', 'name': 'Pasang Aksesoris', 'duration': 2, 'sequence': 3, 'attributes': {'finishing': 75, 'precision': 80, 'stamina': 40}, 'output_code': 'AKS-TW', 'requirements': ['BDN-TW']},
-                {'id': 'TW4', 'name': 'Quality Check', 'duration': 1, 'sequence': 4, 'attributes': {'inspection': 80, 'attention': 85, 'stamina': 30}, 'output_code': 'QC-TW', 'requirements': ['AKS-TW']}
+                {'id': 'SL1', 'name': 'Opening the masking paper', 'duration': 1, 'sequence': 1, 
+                 'attributes': {'open_paper': 100, 'quality_control': 90, 'gluing': 50, 'bending': 30, 'assembling': 30, 'edge_scrap': 70}, 
+                 'output_code': 'SL1-OUT', 'requirements': []},
+                {'id': 'SL2', 'name': 'Unsharp/scrap the edge of the acrylic sheet', 'duration': 1, 'sequence': 2, 
+                 'attributes': {'edge_scrap': 100, 'quality_control': 90, 'open_paper': 60, 'gluing': 45, 'bending': 20, 'assembling': 30}, 
+                 'output_code': 'SL2-OUT', 'requirements': []},
+                {'id': 'SL3', 'name': '1st step - top bending fold', 'duration': 1, 'sequence': 3, 
+                 'attributes': {'bending': 100, 'gluing': 50, 'assembling': 40, 'quality_control': 40, 'open_paper': 20, 'edge_scrap': 20}, 
+                 'output_code': 'SL3-OUT', 'requirements': ['SL1-OUT', 'SL2-OUT']},
+                {'id': 'SL4', 'name': '2nd step - 1st foot side 15 degrees bending', 'duration': 1, 'sequence': 4, 
+                 'attributes': {'bending': 100, 'quality_control': 40, 'open_paper': 40, 'gluing': 40, 'assembling': 30, 'edge_scrap': 10}, 
+                 'output_code': 'SL4-OUT', 'requirements': ['SL3-OUT']},
+                {'id': 'SL5', 'name': 'QC-bending results and putting it in box', 'duration': 1, 'sequence': 5, 
+                 'attributes': {'quality_control': 100, 'open_paper': 80, 'edge_scrap': 30, 'bending': 20, 'gluing': 10, 'assembling': 10}, 
+                 'output_code': 'SL5-OUT', 'requirements': ['SL4-OUT']}
             ]
         }
     }
 
-# Initialize worker database
 def init_worker_db():
+    """Initialize worker database with sample workers and their skills"""
     return {
         'W001': {
-            'name': 'Ahmad',
-            'skills': {'cutting': 90, 'precision': 75, 'stamina': 80, 'sewing': 50, 'gluing': 60, 'assembly': 65, 'finishing': 70, 'inspection': 60, 'molding': 40, 'attention': 75},
-            'favorites': ['Sepatu Kulit', 'Tas Wanita', 'Sandal Eva'],
-            'preference': 'fixed',  # fixed or flow
-            'history': []
+            'id': 'W001',
+            'name': 'John Smith',
+            'skills': {
+                'open_paper': 90,
+                'quality_control': 85,
+                'edge_scrap': 80,
+                'bending': 75,
+                'gluing': 70,
+                'assembling': 65
+            },
+            'preference': 'fixed',
+            'favorites': ['Standing Acrylic T', 'Standing Acrylic L'],
+            'availability': True
         },
         'W002': {
-            'name': 'Budi',
-            'skills': {'cutting': 60, 'precision': 80, 'stamina': 70, 'sewing': 90, 'gluing': 50, 'assembly': 55, 'finishing': 65, 'inspection': 70, 'molding': 30, 'attention': 85},
-            'favorites': ['Tas Wanita', 'Sepatu Kulit', 'Sandal Eva'],
+            'id': 'W002',
+            'name': 'Jane Doe',
+            'skills': {
+                'open_paper': 65,
+                'quality_control': 95,
+                'edge_scrap': 60,
+                'bending': 90,
+                'gluing': 85,
+                'assembling': 80
+            },
             'preference': 'flow',
-            'history': []
+            'favorites': ['Standing Acrylic L', 'Standing Acrylic T'],
+            'availability': True
         },
         'W003': {
-            'name': 'Citra',
-            'skills': {'cutting': 55, 'precision': 85, 'stamina': 60, 'sewing': 75, 'gluing': 65, 'assembly': 80, 'finishing': 85, 'inspection': 90, 'molding': 50, 'attention': 90},
-            'favorites': ['Sandal Eva', 'Tas Wanita', 'Sepatu Kulit'],
+            'id': 'W003',
+            'name': 'Mike Johnson',
+            'skills': {
+                'open_paper': 70,
+                'quality_control': 75,
+                'edge_scrap': 95,
+                'bending': 65,
+                'gluing': 90,
+                'assembling': 85
+            },
             'preference': 'fixed',
-            'history': []
-        },
-        'W004': {
-            'name': 'Deni',
-            'skills': {'cutting': 85, 'precision': 70, 'stamina': 90, 'sewing': 60, 'gluing': 85, 'assembly': 75, 'finishing': 70, 'inspection': 65, 'molding': 80, 'attention': 60},
-            'favorites': ['Sepatu Kulit', 'Sandal Eva', 'Tas Wanita'],
-            'preference': 'flow',
-            'history': []
+            'favorites': ['Standing Acrylic T'],
+            'availability': True
         }
     }
 
-# Function to get all tasks for production orders
 def get_all_tasks_for_production(orders, product_db):
+    """Generate all tasks needed for the production orders"""
     all_tasks = []
     
     for product, quantity in orders.items():
-        if product in product_db:
-            for _ in range(quantity):
+        if product in product_db and quantity > 0:
+            for i in range(quantity):
+                instance_id = i + 1
                 for task in product_db[product]['tasks']:
                     task_copy = task.copy()
                     task_copy['product'] = product
-                    task_copy['instance_id'] = str(uuid.uuid4())[:8]
+                    task_copy['instance_id'] = instance_id
+                    task_copy['output_code'] = f"{task['output_code']}-{instance_id}"
+                    
+                    # Adjust requirements to include instance ID
+                    updated_requirements = []
+                    for req in task['requirements']:
+                        updated_requirements.append(f"{req}-{instance_id}")
+                    task_copy['requirements'] = updated_requirements
+                    
                     all_tasks.append(task_copy)
     
     return all_tasks

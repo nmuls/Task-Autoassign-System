@@ -1,178 +1,171 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import plotly.figure_factory as ff
 import pandas as pd
-import plotly.express as px
 import streamlit as st
-from datetime import datetime, timedelta
 
 def display_worker_skills(worker_data):
-    """Display worker skills as radar chart and bar chart"""
-    # Convert skills to DataFrame
-    skills_df = pd.DataFrame({
-        "Skill": list(worker_data["skills"].keys()),
-        "Value": list(worker_data["skills"].values())
+    """Display worker skills as a bar chart"""
+    skills = worker_data['skills']
+    
+    # Create a pandas dataframe for the skills
+    skill_df = pd.DataFrame({
+        'Skill': list(skills.keys()),
+        'Level': list(skills.values())
     })
     
-    # Display as table and chart
-    col1, col2 = st.columns(2)
+    # Sort by skill level
+    skill_df = skill_df.sort_values('Level', ascending=False)
     
-    with col1:
-        st.dataframe(skills_df.sort_values("Value", ascending=False))
-    
-    with col2:
-        fig = px.bar(
-            skills_df.sort_values("Value"),
-            x="Value",
-            y="Skill",
-            orientation='h',
-            title=f"{worker_data['name']}'s Skills"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Display skills as radar chart
-    fig = px.line_polar(
-        skills_df,
-        r="Value",
-        theta="Skill",
-        line_close=True,
-        title=f"{worker_data['name']}'s Skills Radar"
-    )
-    fig.update_polars(radialaxis=dict(visible=True, range=[0, 100]))
-    st.plotly_chart(fig, use_container_width=True)
+    # Display as a bar chart
+    st.bar_chart(skill_df.set_index('Skill'))
 
-def display_best_task_matches(worker_data, product_db, worker_name):
-    """Display best task matches for a worker"""
-    # Calculate match scores for all product tasks
+def display_best_task_matches(worker, product_db, worker_name):
+    """Display the best task matches for a worker"""
     from system import calculate_worker_task_match
     
-    best_matches = []
-    for product, product_info in product_db.items():
-        for task in product_info['tasks']:
-            match_score = calculate_worker_task_match(worker_data, task)
-            best_matches.append({
-                'Product': product,
+    # Calculate match score for all tasks across all products
+    matches = []
+    
+    for product_name, product_data in product_db.items():
+        for task in product_data['tasks']:
+            score = calculate_worker_task_match(worker, task)
+            matches.append({
+                'Product': product_name,
                 'Task': task['name'],
-                'Match Score': match_score
+                'Match Score': round(score * 100, 1)
             })
     
-    # Display top 5 best matches
-    best_matches_df = pd.DataFrame(best_matches).sort_values('Match Score', ascending=False).head(5)
-    st.dataframe(best_matches_df)
+    # Convert to dataframe and sort
+    match_df = pd.DataFrame(matches)
+    match_df = match_df.sort_values('Match Score', ascending=False)
     
-    # Create bar chart for best matches
-    fig = px.bar(
-        best_matches_df,
-        x='Match Score',
-        y='Task',
-        color='Product',
-        title=f"Top 5 Task Matches for {worker_name}",
-        orientation='h'
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # Display top matches
+    st.dataframe(match_df, height=200)
 
 def display_task_attributes(product_data, product_name):
     """Display task attributes for a product"""
-    st.subheader("Task Attributes")
+    tasks = product_data['tasks']
     
-    # Prepare data for radar chart
-    task_attributes = {}
-    for task in product_data["tasks"]:
-        attributes = task["attributes"]
-        task_attributes[task["name"]] = attributes
+    # Collect all unique attributes
+    all_attributes = set()
+    for task in tasks:
+        all_attributes.update(task['attributes'].keys())
     
-    # Create a radar chart for each task's attributes
-    for task_name, attributes in task_attributes.items():
-        df_attr = pd.DataFrame({
-            "Attribute": list(attributes.keys()),
-            "Value": list(attributes.values())
-        })
-        
-        fig = px.line_polar(
-            df_attr,
-            r="Value",
-            theta="Attribute",
-            line_close=True,
-            title=f"{task_name} Attributes"
-        )
-        fig.update_polars(radialaxis=dict(visible=True, range=[0, 100]))
-        st.plotly_chart(fig, use_container_width=True)
+    # Create a matrix for the heatmap
+    attr_matrix = []
+    task_names = []
+    
+    for task in tasks:
+        task_names.append(task['name'])
+        row = []
+        for attr in sorted(all_attributes):
+            row.append(task['attributes'].get(attr, 0))
+        attr_matrix.append(row)
+    
+    # Create a dataframe
+    df = pd.DataFrame(attr_matrix, index=task_names, columns=sorted(all_attributes))
+    
+    # Display as a heatmap
+    st.write(f"Task Attributes Heatmap for {product_name}")
+    st.dataframe(df.style.background_gradient(cmap='viridis', axis=None))
 
 def create_gantt_chart(schedule_data):
     """Create a Gantt chart visualization of the schedule"""
-    gantt_data = []
+    if not schedule_data:
+        return None
     
-    for entry in schedule_data:
-        if entry["task_id"] is not None:  # Skip idle slots
-            start_time = datetime.strptime(f"{entry['day']} {entry['time']}", "%d %H:%M")
-            start_time = start_time.replace(year=2025, month=1)
-            
-            # Find end time based on task duration
-            # For simplicity, assuming all tasks are 30 min blocks
-            end_time = start_time + timedelta(minutes=30)
-            
-            gantt_data.append({
-                "Task": f"{entry['product']} - {entry['task_name']}",
-                "Start": start_time,
-                "Finish": end_time,
-                "Resource": entry["worker_name"],
-                "Worker Role": entry["worker_role"],
-                "Task Role": entry["task_role"]
-            })
+    # Process schedule data for Gantt chart
+    df = []
     
-    if gantt_data:
-        df_gantt = pd.DataFrame(gantt_data)
-        
-        # Create custom color map for worker roles
-        color_map = {"fixed": "blue", "flow": "green", "rebalanced": "orange"}
-        
-        fig = px.timeline(
-            df_gantt, 
-            x_start="Start", 
-            x_end="Finish", 
-            y="Resource", 
-            color="Task",
-            hover_data=["Worker Role", "Task Role"],
-            title="Production Schedule Gantt Chart"
-        )
-        
-        fig.update_layout(
-            xaxis_title="Time",
-            yaxis_title="Worker"
-        )
-        
-        return fig
+    # Group tasks by worker and task
+    task_groups = {}
     
-    return None
+    for item in schedule_data:
+        # Skip idle tasks
+        if item['status'] == 'idle':
+            continue
+        
+        # Create a unique key for each task
+        task_key = f"{item['worker_id']}_{item['product']}_{item['task_id']}_{item['task_name']}"
+        
+        if task_key not in task_groups:
+            task_groups[task_key] = {
+                'Task': f"{item['task_name']} - {item['worker_name']}",
+                'Start': None,
+                'Finish': None,
+                'Resource': item['worker_name'],
+                'Day': item['day']
+            }
+        
+        # Parse time
+        hours, minutes = map(int, item['time'].split(':'))
+        current_time = hours + minutes/60
+        
+        # Set start time if not set
+        if task_groups[task_key]['Start'] is None:
+            task_groups[task_key]['Start'] = current_time
+        
+        # Always update finish time to the latest
+        task_groups[task_key]['Finish'] = current_time + 0.5  # Each slot is 30 minutes
+    
+    # Convert to list
+    for task_key, task_data in task_groups.items():
+        df.append(task_data)
+    
+    # If no tasks, return None
+    if not df:
+        return None
+    
+    # Group by day
+    df_by_day = {}
+    for item in df:
+        day = item['Day']
+        if day not in df_by_day:
+            df_by_day[day] = []
+        
+        # Copy item without day field
+        new_item = item.copy()
+        del new_item['Day']
+        df_by_day[day].append(new_item)
+    
+    # Create a figure for each day
+    fig = ff.create_gantt(
+        df_by_day[1],  # Show first day by default
+        index_col='Resource',
+        show_colorbar=True,
+        group_tasks=True,
+        showgrid_x=True,
+        showgrid_y=True,
+        title=f"Production Schedule - Day 1"
+    )
+    
+    # Set x-axis limits to 8AM - 4PM (8-16)
+    fig.update_xaxes(range=[8, 16], title_text="Time (Hours)")
+    
+    # Set y-axis title
+    fig.update_yaxes(title_text="Worker")
+    
+    # Customize height
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=50, b=0))
+    
+    return fig
 
 def display_daily_schedule(schedule_df, day):
-    """Display detailed schedule for a specific day"""
-    day_data = schedule_df[schedule_df["day"] == day]
+    """Display the schedule for a specific day as a table"""
+    # Filter for the given day
+    day_df = schedule_df[schedule_df['day'] == day].copy()
     
-    with st.expander(f"Day {day}"):
-        # Pivot the data to create a timetable
-        pivot_df = day_data.pivot(index=["worker_name", "worker_id"], columns="time", values="task_name")
-        st.dataframe(pivot_df, use_container_width=True)
-        
-        # Count task distribution
-        task_counts = day_data[day_data["task_id"].notnull()].groupby(["worker_name", "product", "task_name"]).size().reset_index(name="count")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Task Distribution")
-            st.dataframe(task_counts)
-        
-        with col2:
-            # Calculate idle time percentage
-            idle_counts = day_data.groupby("worker_name")["status"].apply(lambda x: (x == "idle").mean() * 100).reset_index()
-            idle_counts.columns = ["Worker", "Idle Time (%)"]
-            
-            st.subheader("Idle Time")
-            st.dataframe(idle_counts)
-            
-            # Create a bar chart for idle time
-            fig = px.bar(
-                idle_counts,
-                x="Worker",
-                y="Idle Time (%)",
-                title="Worker Idle Time Percentage"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    # Sort by time and worker
+    day_df = day_df.sort_values(['time', 'worker_name'])
+    
+    # Clean up columns for display
+    display_df = day_df[['time', 'worker_name', 'product', 'task_name', 'status']]
+    display_df.columns = ['Time', 'Worker', 'Product', 'Task', 'Status']
+    
+    # Replace None with empty strings
+    display_df = display_df.fillna('')
+    
+    # Display
+    st.write(f"**Day {day} Schedule**")
+    st.dataframe(display_df, height=400)
