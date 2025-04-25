@@ -101,7 +101,8 @@ def create_gantt_chart(schedule_data):
     
     for entry in schedule_data:
         if entry["task_id"] is not None:  # Skip idle slots
-            start_time = datetime.strptime(f"Day {entry['day']} {entry['time']}", "Day %d %H:%M")
+            start_time = datetime.strptime(f"{entry['day']} {entry['time']}", "%d %H:%M")
+            start_time = start_time.replace(year=2025, month=1)
             
             # Find end time based on task duration
             # For simplicity, assuming all tasks are 30 min blocks
