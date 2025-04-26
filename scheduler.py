@@ -1,86 +1,20 @@
-from datetime import datetime, timedelta
-from db import get_all_tasks_for_production
-
-def calculate_task_similarity(task1, task2):
-    """Calculate similarity between two tasks based on their attributes"""
-    similarity = 0
-    common_attributes = 0
-    
-    for attr in task1['attributes']:
-        if attr in task2['attributes']:
-            similarity += 100 - abs(task1['attributes'][attr] - task2['attributes'][attr])
-            common_attributes += 1
-    
-    if common_attributes == 0:
-        return 0
-    
-    return similarity / common_attributes
-
-def calculate_worker_task_match(worker, task):
-    """Calculate match score between a worker and a task"""
-    skill_score = 0
-    relevant_skills = 0
-    
-    for attr in task['attributes']:
-        if attr in worker['skills']:
-            skill_score += worker['skills'][attr]
-            relevant_skills += 1
-    
-    if relevant_skills == 0:
-        return 0
-    
-    return skill_score / relevant_skills
-
-def calculate_worker_role_score(worker, all_tasks):
-    """Calculate if worker should be fixed or flow based on skills, motivation and preference"""
-    # Extract the worker's preference weight
-    preference_weight = 1 if worker['preference'] == 'fixed' else 0
-    
-    # Calculate average skill score across all tasks
-    total_skill = 0
-    for task_list in all_tasks.values():
-        for task in task_list:
-            total_skill += calculate_worker_task_match(worker, task)
-    
-    avg_skill = total_skill / sum(len(tasks) for tasks in all_tasks.values())
-    
-    # Calculate motivation based on favorites (simple approach)
-    motivation = 0.5  # Neutral motivation
-    
-    # Calculate final score
-    score = (avg_skill * 0.6) + (motivation * 0.2) + (preference_weight * 0.2)
-    
-    return score, 'fixed' if score > 70 else 'flow'
-
-def check_prerequisites_met(completed_items, requirements):
-    """Check if all prerequisites for a task have been met"""
-    if not requirements:
-        return True
-    
-    for req in requirements:
-        if req not in completed_items:
-            return False
-    
-    return True
-
-def assign_roles_to_workers(workers, all_tasks_by_product):
-    """Assign fixed or flow roles to workers based on their characteristics"""
-    worker_roles = {}
-    
-    for worker_id, worker in workers.items():
-        score, role = calculate_worker_role_score(worker, all_tasks_by_product)
-        worker_roles[worker_id] = {
-            'name': worker['name'],
-            'assigned_role': role,
-            'score': score
-        }
-    
-    return worker_roles
+from utils import (
+    get_slot_from_time, 
+    calculate_task_similarity, 
+    calculate_worker_task_match, 
+    calculate_worker_role_score, 
+    check_prerequisites_met, 
+    get_all_tasks_for_production
+)
 
 def generate_schedule(orders, worker_availability, product_db, worker_db):
     """Generate the production schedule based on orders and worker availability"""
-    # Filter workers based on availability
-    available_workers = {worker_id: worker_db[worker_id] for worker_id in worker_availability if worker_id in worker_db}
+    # Get all workers and their availability
+    available_workers = {}
+    for worker_id, availability in worker_availability.items():
+        if worker_id in worker_db and availability['available']:
+            available_workers[worker_id] = worker_db[worker_id].copy()
+            available_workers[worker_id]['start_slot'] = get_slot_from_time(availability['start_time'])
     
     # No workers available
     if not available_workers:
@@ -96,10 +30,17 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
     # Group tasks by product
     all_tasks_by_product = {}
     for product in product_db:
-        all_tasks_by_product[product] = [task for task in product_db[product]['tasks']]
+        all_tasks_by_product[product] = product_db[product]
     
     # Assign roles to workers (fixed or flow)
-    worker_roles = assign_roles_to_workers(available_workers, all_tasks_by_product)
+    worker_roles = {}
+    for worker_id, worker in available_workers.items():
+        score, role = calculate_worker_role_score(worker, all_tasks_by_product)
+        worker_roles[worker_id] = {
+            'name': worker['name'],
+            'assigned_role': role,
+            'score': score
+        }
     
     # Sort tasks by sequence number and product
     sorted_tasks = sorted(all_tasks, key=lambda x: (x['sequence'], x['product']))
@@ -163,9 +104,11 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
     # Main scheduling algorithm
     for day in range(days_needed):
         for slot in range(time_slots):
-            # Prioritize fixed workers first
-            for worker_id, role_info in sorted(worker_roles.items(), 
-                                               key=lambda x: 0 if x[1]['assigned_role'] == 'fixed' else 1):
+            # Check worker availability for this slot
+            for worker_id, worker in available_workers.items():
+                # Skip if worker not available yet for this slot
+                if worker['start_slot'] > slot:
+                    continue
                 
                 # Skip if already assigned for this slot
                 if schedule[worker_id][day][slot] is not None:
@@ -175,7 +118,7 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
                 best_task = None
                 
                 # For fixed workers, try to find tasks similar to their last assignment
-                if role_info['assigned_role'] == 'fixed' and slot > 0:
+                if worker_roles[worker_id]['assigned_role'] == 'fixed' and slot > 0:
                     last_slot = slot - 1
                     last_day = day
                     
@@ -185,7 +128,7 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
                         last_day = day - 1
                     
                     # Only look back if we're not at the first day/slot
-                    if last_day >= 0:
+                    if last_day >= 0 and last_slot >= available_workers[worker_id]['start_slot']:
                         last_task = schedule[worker_id][last_day][last_slot]
                         if last_task and isinstance(last_task, dict):
                             best_task = find_similar_task(last_task, worker_id, day, slot)
@@ -222,20 +165,26 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
                             current_slot -= time_slots
                             current_day += 1
                         
-                        # Check if slot is available (could be already filled from previous iterations)
-                        if current_day < days_needed and schedule[worker_id][current_day][current_slot] is None:
+                        # Check if slot is available and within worker's available time
+                        if (current_day < days_needed and 
+                            current_slot >= available_workers[worker_id]['start_slot'] and
+                            schedule[worker_id][current_day][current_slot] is None):
                             # Create a unique task instance for the schedule
                             task_instance = best_task.copy()
                             task_instance['status'] = 'in_progress' if i < slots_needed - 1 else 'completed'
-                            task_instance['worker_role'] = role_info['assigned_role']
+                            task_instance['worker_role'] = worker_roles[worker_id]['assigned_role']
                             
                             schedule[worker_id][current_day][current_slot] = task_instance
                             
                             # Mark task as completed on the final slot
                             if i == slots_needed - 1:
                                 completed_items.add(best_task['output_code'])
+                        else:
+                            # If we can't complete the task, break out and don't assign
+                            break
     
     # Rebalance - if a fixed worker has too many repetitive tasks and others are idle
+    # Apply the >32 slots rule (which means >8 30-minute slots in our system)
     for day in range(days_needed):
         worker_task_counts = {}
         idle_workers = []
@@ -246,6 +195,10 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
             idle_count = 0
             
             for slot in range(time_slots):
+                # Skip slots before worker's start time
+                if slot < available_workers[worker_id]['start_slot']:
+                    continue
+                    
                 task = schedule[worker_id][day][slot]
                 if task:
                     task_id = task['id']
@@ -253,17 +206,20 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
                 else:
                     idle_count += 1
             
-            if idle_count > time_slots // 2:  # If worker is idle for more than half the day
+            if idle_count > (time_slots - available_workers[worker_id]['start_slot']) // 2:
                 idle_workers.append(worker_id)
         
-        # Rebalance if there are fixed workers doing too many repetitive tasks
+        # Rebalance if there are fixed workers doing too many repetitive tasks (>= 8 slots)
         for worker_id in worker_task_counts:
             if worker_roles[worker_id]['assigned_role'] == 'fixed':
                 for task_id, count in worker_task_counts[worker_id].items():
-                    if count > 8 and idle_workers:  # If a task is repeated more than half the day
+                    if count > 8 and idle_workers:  # If a task is repeated more than 8 slots
                         # Find slots where this task is assigned
                         task_slots = []
                         for slot in range(time_slots):
+                            if slot < available_workers[worker_id]['start_slot']:
+                                continue
+                                
                             task = schedule[worker_id][day][slot]
                             if task and task['id'] == task_id:
                                 task_slots.append(slot)
@@ -274,7 +230,14 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
                         
                         for i in range(slots_to_redistribute):
                             idle_worker_id = idle_workers[i % len(idle_workers)]
-                            slot_to_move = task_slots.pop()
+                            
+                            # Make sure we're not assigning to slots before worker's start time
+                            valid_slots = [s for s in task_slots if s >= available_workers[idle_worker_id]['start_slot']]
+                            if not valid_slots:
+                                continue
+                                
+                            slot_to_move = valid_slots.pop()
+                            task_slots.remove(slot_to_move)
                             
                             # Move the task and mark as rebalanced
                             task = schedule[worker_id][day][slot_to_move]
@@ -282,58 +245,62 @@ def generate_schedule(orders, worker_availability, product_db, worker_db):
                             schedule[worker_id][day][slot_to_move] = None
                             
                             # Find an empty slot for the idle worker
-                            for idle_slot in range(time_slots):
+                            for idle_slot in range(available_workers[idle_worker_id]['start_slot'], time_slots):
                                 if schedule[idle_worker_id][day][idle_slot] is None:
                                     schedule[idle_worker_id][day][idle_slot] = task
                                     break
     
     # Convert schedule to a more readable format
+    from utils import get_time_from_slot
     formatted_schedule = []
     
     for worker_id, days in schedule.items():
         worker_name = available_workers[worker_id]['name']
         role = worker_roles[worker_id]['assigned_role']
         
-        for day_idx, slots in enumerate(days):
-            for slot_idx, task in enumerate(slots):
-                # Calculate time for this slot (8:00 AM start)
-                hour = 8 + (slot_idx // 2)
-                minute = (slot_idx % 2) * 30
-                time_str = f"{hour:02d}:{minute:02d}"
-                
-                if task:
+        for day_num, day_schedule in enumerate(days):
+            for slot_num, task in enumerate(day_schedule):
+                if task is not None:
                     formatted_schedule.append({
-                        "day": day_idx + 1,
-                        "time": time_str,
-                        "worker_id": worker_id,
-                        "worker_name": worker_name,
-                        "worker_role": role,
-                        "task_role": task['worker_role'],
-                        "product": task['product'],
-                        "task_id": task['id'],
-                        "task_name": task['name'],
-                        "status": task['status']
-                    })
-                else:
-                    formatted_schedule.append({
-                        "day": day_idx + 1,
-                        "time": time_str,
-                        "worker_id": worker_id,
-                        "worker_name": worker_name,
-                        "worker_role": role,
-                        "task_role": "idle",
-                        "product": None,
-                        "task_id": None,
-                        "task_name": "IDLE",
-                        "status": "idle"
+                        'worker_id': worker_id,
+                        'worker_name': worker_name,
+                        'assigned_role': task.get('worker_role', role),
+                        'day': day_num + 1,
+                        'time_slot': slot_num,
+                        'start_time': get_time_from_slot(slot_num),
+                        'end_time': get_time_from_slot(slot_num + task['duration']),
+                        'product': task['product'],
+                        'task_id': task['id'],
+                        'task_name': task['name'],
+                        'status': task['status']
                     })
     
+    # Calculate production statistics
+    production_stats = {
+        'total_tasks_assigned': len(assigned_tasks),
+        'total_tasks_needed': len(sorted_tasks),
+        'completion_percentage': len(assigned_tasks) / len(sorted_tasks) * 100 if sorted_tasks else 0,
+        'days_needed': days_needed,
+        'workers_utilized': len(available_workers)
+    }
+    
+    # Check for unassigned tasks
+    unassigned_tasks = []
+    for task in sorted_tasks:
+        task_key = f"{task['product']}_{task['id']}_{task['instance_id']}"
+        if task_key not in assigned_tasks:
+            unassigned_tasks.append({
+                'product': task['product'],
+                'task_id': task['id'],
+                'task_name': task['name'],
+                'sequence': task['sequence'],
+                'requirements': task['requirements']
+            })
+    
     return {
-        "schedule": formatted_schedule,
-        "worker_roles": worker_roles,
-        "completion_info": {
-            "days_needed": days_needed,
-            "completed_items": len(completed_items),
-            "total_tasks": len(sorted_tasks)
-        }
+        'schedule': formatted_schedule,
+        'worker_roles': worker_roles,
+        'stats': production_stats,
+        'unassigned_tasks': unassigned_tasks,
+        'days_needed': days_needed
     }

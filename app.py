@@ -1,147 +1,191 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
+import uuid
+import plotly.express as px
+import matplotlib.pyplot as plt
+import pandas as pd
 
-# Import our modules
-from db import init_product_db, init_worker_db
-from system import generate_schedule, calculate_worker_task_match
-from visualization import (
-    display_worker_skills, 
-    display_best_task_matches, 
-    display_task_attributes, 
-    create_gantt_chart,
-    display_daily_schedule
-)
+# Import local modules
+from database import init_product_db_from_csv, init_worker_db
+from utils import get_slot_from_time, get_time_from_slot
+from scheduler import generate_schedule
+from visualization import display_task_attributes, visualize_schedule
 
 # Set page configuration
 st.set_page_config(page_title="Task Autoassign System", layout="wide")
 
 # Initialize session state for databases if they don't exist
 if 'product_db' not in st.session_state:
-    st.session_state.product_db = init_product_db()
+    st.session_state.product_db = init_product_db_from_csv("Prototype.csv")
 
 if 'worker_db' not in st.session_state:
     st.session_state.worker_db = init_worker_db()
 
+# Main application UI
 def main():
-    st.title("Task Autoassign System")
+    st.title("Task Auto-assign Production System")
     
-    tab1, tab2, tab3 = st.tabs(["Production Order", "Product Database", "Worker Database"])
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    app_mode = st.sidebar.radio(
+        "Select Mode",
+        ["Home", "Production Planning", "Worker Management", "Product Management"]
+    )
     
-    with tab1:
-        st.header("Production Order Input")
+    # Home screen
+    if app_mode == "Home":
+        st.header("Welcome to Task Auto-assign Production System")
+        st.write("""
+        This system helps you optimize your production schedule based on:
+        - Worker skills and preferences
+        - Product task requirements
+        - Order quantities
         
-        # Product Orders
-        st.subheader("Products")
+        Use the sidebar to navigate to different sections of the application.
+        """)
         
-        orders = {}
+        # Show quick stats
         col1, col2 = st.columns(2)
-        
         with col1:
-            for i, product in enumerate(st.session_state.product_db.keys()):
-                quantity = st.number_input(f"{product} Quantity", min_value=0, value=0, key=f"prod_{i}")
-                orders[product] = quantity
-        
-        # Worker Availability
-        st.subheader("Worker Availability")
-        
-        worker_availability = []
+            st.metric("Total Workers", len(st.session_state.worker_db))
         with col2:
-            for worker_id, worker in st.session_state.worker_db.items():
-                if st.checkbox(f"{worker['name']} (ID: {worker_id})", value=True, key=f"worker_{worker_id}"):
-                    worker_availability.append(worker_id)
+            st.metric("Total Products", len(st.session_state.product_db))
+    
+    # Production Planning
+    elif app_mode == "Production Planning":
+        st.header("Production Planning")
         
-        # Generate Schedule Button
-        if st.button("Generate Schedule"):
-            with st.spinner("Generating production schedule..."):
-                result = generate_schedule(
-                    orders, 
-                    worker_availability, 
-                    st.session_state.product_db, 
-                    st.session_state.worker_db
+        # Get all product names
+        product_names = list(st.session_state.product_db.keys())
+        
+        # Product selection using dropdowns
+        st.subheader("Select Products for Production")
+        
+        # Input orders using dropdowns
+        orders = {}
+        col1, col2, col3 = st.columns(3)
+        
+        # Allow user to select products from dropdown and specify quantity
+        with col1:
+            selected_product1 = st.selectbox("Select Product 1", ["None"] + product_names)
+            if selected_product1 != "None":
+                orders[selected_product1] = st.number_input(f"{selected_product1} quantity", min_value=0, value=1, step=1)
+        
+        with col2:
+            remaining_products = ["None"] + [p for p in product_names if p not in orders.keys()]
+            selected_product2 = st.selectbox("Select Product 2", remaining_products)
+            if selected_product2 != "None":
+                orders[selected_product2] = st.number_input(f"{selected_product2} quantity", min_value=0, value=1, step=1)
+        
+        with col3:
+            remaining_products2 = ["None"] + [p for p in product_names if p not in orders.keys()]
+            selected_product3 = st.selectbox("Select Product 3", remaining_products2)
+            if selected_product3 != "None":
+                orders[selected_product3] = st.number_input(f"{selected_product3} quantity", min_value=0, value=1, step=1)
+        
+        # Worker availability
+        st.subheader("Worker Availability (work hours 08.00-16.00 / 16 slots)")
+        
+        worker_availability = {}
+        cols = st.columns(4)
+        
+        # Generate all possible time slots between 8:00 and 16:00 with 30-minute intervals
+        time_slots = []
+        start = datetime.strptime("08:00", "%H:%M")
+        end = datetime.strptime("16:00", "%H:%M")
+        current = start
+        
+        while current <= end:
+            time_slots.append(current.strftime("%H:%M"))
+            current += timedelta(minutes=30)
+        
+        for i, (worker_id, worker) in enumerate(st.session_state.worker_db.items()):
+            col = cols[i % 4]
+            with col:
+                available = st.checkbox(f"{worker['name']} Available", value=True, key=f"avail_{worker_id}")
+                start_time = st.selectbox(
+                    f"{worker['name']} Start Time",
+                    time_slots,
+                    index=0,
+                    key=f"start_{worker_id}"
                 )
-                
-                if "error" in result:
-                    st.error(result["error"])
-                else:
-                    st.session_state.schedule_result = result
-                    st.success(f"Schedule generated! {result['completion_info']['days_needed']} days needed.")
+                preference = st.selectbox(
+                    f"{worker['name']} Role",
+                    ["fixed", "flow"],
+                    index=0 if worker['preference'] == 'fixed' else 1,
+                    key=f"pref_{worker_id}"
+                )
+                worker_availability[worker_id] = {
+                    "available": available,
+                    "start_time": start_time,
+                    "preference": preference
+                }
         
-        # Display schedule if available
-        if 'schedule_result' in st.session_state:
-            st.header("Production Schedule")
-            
-            # Display schedule information
-            total_days = st.session_state.schedule_result["completion_info"]["days_needed"]
-            st.write(f"Total days needed: {total_days}")
-            
-            # Display worker roles
-            st.subheader("Worker Roles")
-            roles_data = []
-            for worker_id, role_info in st.session_state.schedule_result["worker_roles"].items():
-                roles_data.append({
-                    "Worker ID": worker_id,
-                    "Name": role_info["name"],
-                    "Role": role_info["assigned_role"],
-                    "Score": f"{role_info['score']:.2f}"
-                })
-            
-            st.dataframe(pd.DataFrame(roles_data))
-            
-            # Create Gantt chart
-            st.subheader("Production Gantt Chart")
-            
-            gantt_fig = create_gantt_chart(st.session_state.schedule_result["schedule"])
-            if gantt_fig:
-                st.plotly_chart(gantt_fig, use_container_width=True)
-            
-            # Display detailed schedule
-            st.subheader("Detailed Schedule")
-            
-            # Group by day
-            schedule_df = pd.DataFrame(st.session_state.schedule_result["schedule"])
-            days = schedule_df["day"].unique()
-            
-            for day in days:
-                display_daily_schedule(schedule_df, day)
+        # Generate schedule button
+        if st.button("Generate Production Schedule"):
+            # Check if at least one product is selected
+            if not orders:
+                st.error("Please select at least one product and specify quantity.")
+            else:
+                with st.spinner("Generating schedule..."):
+                    # Update worker preferences based on current selection
+                    for worker_id, availability in worker_availability.items():
+                        if worker_id in st.session_state.worker_db:
+                            st.session_state.worker_db[worker_id]['preference'] = availability['preference']
+                    
+                    schedule_result = generate_schedule(
+                        orders, 
+                        worker_availability, 
+                        st.session_state.product_db, 
+                        st.session_state.worker_db
+                    )
+                    
+                    # Display schedule statistics
+                    if 'stats' in schedule_result:
+                        st.subheader("Production Schedule Statistics")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("Total Tasks Assigned", schedule_result['stats']['total_tasks_assigned'])
+                        with col2:
+                            st.metric("Total Tasks Required", schedule_result['stats']['total_tasks_needed'])
+                        with col3:
+                            st.metric("Completion Percentage", f"{schedule_result['stats']['completion_percentage']:.1f}%")
+                    
+                    # Display worker roles
+                    if 'worker_roles' in schedule_result:
+                        st.subheader("Worker Role Assignments")
+                        roles_data = []
+                        
+                        for worker_id, role_info in schedule_result['worker_roles'].items():
+                            roles_data.append({
+                                "Worker": role_info['name'],
+                                "Assigned Role": role_info['assigned_role'],
+                                "Role Score": f"{role_info['score']:.1f}"
+                            })
+                        
+                        st.table(roles_data)
+                    
+                    # Display unassigned tasks if any
+                    if 'unassigned_tasks' in schedule_result and schedule_result['unassigned_tasks']:
+                        st.subheader("Unassigned Tasks")
+                        st.warning(f"{len(schedule_result['unassigned_tasks'])} tasks could not be assigned.")
+                        
+                        unassigned_df = pd.DataFrame(schedule_result['unassigned_tasks'])
+                        st.dataframe(unassigned_df)
+                    
+                    # Display schedule visualization
+                    visualize_schedule(schedule_result)
     
-    with tab2:
-        st.header("Product Database")
-        
-        # Display product information
-        for product_name, product_data in st.session_state.product_db.items():
-            with st.expander(f"{product_name}"):
-                # Show product tasks
-                task_df = pd.DataFrame(product_data["tasks"])
-                st.dataframe(task_df)
-                
-                # Show tasks attributes visualization
-                display_task_attributes(product_data, product_name)
+    # Worker Management
+    elif app_mode == "Worker Management":
+        from worker_management import display_worker_management
+        display_worker_management()
     
-    with tab3:
-        st.header("Worker Database")
-        
-        # Display worker information
-        for worker_id, worker_data in st.session_state.worker_db.items():
-            with st.expander(f"{worker_data['name']} (ID: {worker_id})"):
-                # Display worker information
-                st.write(f"**Preference:** {worker_data['preference']}")
-                
-                # Display favorites
-                st.write("**Product Preferences:**")
-                for i, product in enumerate(worker_data['favorites']):
-                    st.write(f"{i+1}. {product}")
-                
-                # Display skills
-                st.subheader("Skills")
-                display_worker_skills(worker_data)
-                
-                # Calculate and display best task matches
-                st.subheader("Best Task Matches")
-                display_best_task_matches(worker_data, st.session_state.product_db, worker_data['name'])
+    # Product Management
+    elif app_mode == "Product Management":
+        from product_management import display_product_management
+        display_product_management()
 
-# Run the main function
 if __name__ == "__main__":
     main()
-        
