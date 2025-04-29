@@ -64,20 +64,20 @@ def display_worker_management():
             'availability': availability
         }
         save_worker_db_to_csv(st.session_state.worker_db)
-        st.success(f'Pekerja {name} berhasil ditambahkan!')
+        st.success(f'Worker {name} added successfully!')
 
     def delete_worker(worker_id):
         if worker_id in st.session_state.worker_db:
             del st.session_state.worker_db[worker_id]
             save_worker_db_to_csv(st.session_state.worker_db)
-            st.success(f'Pekerja dengan ID {worker_id} berhasil dihapus!')
+            st.success(f'Worker with ID {worker_id} removed succesfully!')
         else:
-            st.error(f'Pekerja dengan ID {worker_id} tidak ditemukan.')
+            st.error(f'Worker with ID {worker_id} not found.')
 
     def update_worker(worker_id, name=None, skills=None, favorites=None, preference=None, history=None, availability=None):
         worker = st.session_state.worker_db.get(worker_id)
         if not worker:
-            st.error(f'Pekerja dengan ID {worker_id} tidak ditemukan.')
+            st.error(f'Wroker with ID {worker_id} not found.')
             return
         if name:
             worker['name'] = name
@@ -92,7 +92,7 @@ def display_worker_management():
         if availability is not None:
             worker['availability'] = availability
         save_worker_db_to_csv(st.session_state.worker_db)
-        st.success(f'Pekerja dengan ID {worker_id} berhasil diperbarui!')
+        st.success(f'Worker with ID {worker_id} updated succesfully!')
 
     def load_worker_data_from_csv(file_path='worker_input.csv'):
         try:
@@ -148,17 +148,17 @@ def display_worker_management():
                 worker_id = f'worker_{idx+1}'
                 st.session_state.worker_db[worker_id] = data
 
-            st.success('Data pegawai berhasil dimuat dari CSV.')
+            st.success('Worker data import from CSV.= Success!')
         except Exception as e:
-            st.error(f'Gagal memuat data pegawai dari CSV: {e}')
+            st.error(f'Failed to import data from CSV.: {e}')
 
     # Antarmuka pengguna dengan Streamlit
-    st.title('Manajemen Pekerja')
+    st.title('Worker Management')
 
 
     # Form untuk menambahkan pekerja
     with st.form('add_worker_form'):
-        st.subheader('Tambah Pekerja Baru')
+        st.subheader('Add New Worker')
         worker_id = st.text_input('ID Pekerja', help='Masukkan ID unik untuk pekerja, misalnya "worker_1"')
         name = st.text_input('Nama Pekerja', help='Masukkan nama lengkap pekerja')
         
