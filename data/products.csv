@@ -1,0 +1,20 @@
+Product,Task,Result,Requirements,Bending,Gluing,Assembling,EdgeScrap,OpenPaper,QualityControl,DurationSlot
+Standing Acrylic T,opening the masking paper,ST1,,30,50,30,70,100,90,1
+Standing Acrylic T,unsharp/scrap the edge of the acrylic sheet,ST2,,20,45,30,100,60,90,1
+Standing Acrylic T,1st step - top bending fold,ST3,"ST1, ST2",100,50,40,20,20,40,1
+Standing Acrylic T,2nd step - 1st foot side 90 degrees bending,ST4,ST3,100,40,30,10,40,40,1
+Standing Acrylic T,3rd step - 2nd foot side 90 degrees bending,ST5,ST4,100,40,30,10,40,40,1
+Standing Acrylic T,QC-bending results  and putting it in box,ST6,ST5,20,10,10,30,80,100,1
+Standing Acrylic L,opening the masking paper,SL1,,30,50,30,70,100,90,1
+Standing Acrylic L,unsharp/scrap the edge of the acrylic sheet,SL2,,20,45,30,100,60,90,1
+Standing Acrylic L,1st step - top bending fold,SL3,"SL1, SL2",100,50,40,20,20,40,1
+Standing Acrylic L,2nd step - 1st foot side 15 degrees bending,SL4,SL3,100,40,30,10,40,40,1
+Standing Acrylic L,QC-bending results  and putting it in box,SL5,SL4,20,10,10,30,80,100,1
+Brochure Holder size A5,opening the masking paper,BH1,,30,50,30,70,100,90,1
+Brochure Holder size A5,unsharp/scrap the edge of the acrylic sheet,BH2,,20,45,30,100,60,90,1
+Brochure Holder size A5,front body bending step 1,BH3,"BH1, BH2",100,60,40,20,20,40,1
+Brochure Holder size A5,front body bending step 2,BH4,"BH1, BH2",100,60,40,20,20,40,1
+Brochure Holder size A5,"front body bending step 3, and glueing",BH5,"BH3, BH4",100,80,40,20,20,40,1
+Brochure Holder size A5,glue front body to back body,BH6,BH5,20,100,90,20,20,40,1
+Brochure Holder size A5,glue reinforcements,BH7,BH6,20,100,60,20,20,40,1
+Brochure Holder size A5,QC results - putting in box,BH8,BH7,20,10,10,30,80,100,1
