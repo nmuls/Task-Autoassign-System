@@ -71,8 +71,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Helper functions
 def calculate_skill_match(worker_skills, task_attributes):
+    """Calculate skill match score between worker and task"""
     skill_score = 0
     total_weight = 0
     
@@ -104,8 +104,33 @@ def check_requirements_met(completed_tasks, requirements):
     required_tasks = [req.strip() for req in str(requirements).split(',')]
     return all(req in completed_tasks for req in required_tasks)
 
-def assign_tasks(products_to_produce, workers_df, products_df, days=1):
-    """Main algorithm to assign tasks to workers based on skills and task similarity"""
+def calculate_required_days(products_to_produce, workers_df, products_df):
+    """Calculate approximately how many days will be needed to complete all tasks"""
+    # Count total task slots needed
+    total_task_slots = 0
+    for product, quantity in products_to_produce.items():
+        product_tasks = products_df[products_df['Product'] == product]
+        for _, task in product_tasks.iterrows():
+            total_task_slots += task['DurationSlot'] * quantity
+    
+    # Calculate worker slots available per day
+    num_workers = len(workers_df)
+    time_slots = generate_time_slots(8, 16)
+    worker_slots_per_day = num_workers * len(time_slots)
+    
+    # Calculate days needed with 30% buffer for dependencies and constraints
+    estimated_days = total_task_slots / worker_slots_per_day
+    days_with_buffer = int(np.ceil(estimated_days * 1.3))
+    
+    # Ensure at least 1 day, and cap at a reasonable maximum
+    return max(1, min(days_with_buffer, 10))
+
+def assign_tasks(products_to_produce, workers_df, products_df, days=None):
+    """Main algorithm to assign tasks to workers based on fixed/flow roles"""
+    # Auto-calculate days if not specified
+    if days is None:
+        days = calculate_required_days(products_to_produce, workers_df, products_df)
+    
     time_slots = generate_time_slots(8, 16)
     
     # Create multi-day schedule
@@ -115,21 +140,61 @@ def assign_tasks(products_to_produce, workers_df, products_df, days=1):
     
     # Initialize tracking variables
     completed_tasks = set()
+    task_completion_counts = defaultdict(int)  # Track how many of each task have been completed
     worker_stats = {
         worker: {
             'current_role': None,
-            'fixed_task': None,  # The task a fixed worker is currently focused on
-            'fixed_task_count': 0,
+            'fixed_task': None,  # The task a fixed worker is assigned to
+            'fixed_tasks': set(),  # Set of task IDs this fixed worker focuses on
             'task_history': [],
             'completed_products': defaultdict(int),
             'total_tasks_completed': 0
         } for worker in workers_df['Worker']
     }
     
-    # Initialize worker roles dictionary
+    # Determine worker roles based on FlowPreference
     worker_roles = {}
+    for _, worker in workers_df.iterrows():
+        worker_name = worker['Worker']
+        flow_pref = worker['FlowPreference']
+        # Higher preference value means worker prefers flow role
+        worker_roles[worker_name] = 'flow' if flow_pref >= 0.6 else 'fixed'
     
-    # Flatten tasks from all products
+    # Build dependency graph for all tasks in all products
+    dependency_graph = {}
+    task_products = {}  # Map task ID to product
+    task_durations = {}  # Map task ID to duration
+    task_requirements_count = {}  # Map task ID to number of required tasks
+    task_details = {}  # Store complete task details
+    
+    for product, quantity in products_to_produce.items():
+        product_tasks = products_df[products_df['Product'] == product]
+        
+        for _, task in product_tasks.iterrows():
+            task_id = task['Result']
+            task_products[task_id] = product
+            task_durations[task_id] = task['DurationSlot']
+            task_details[task_id] = {
+                'product': product,
+                'task_name': task['Task'],
+                'bending': task['Bending'],
+                'gluing': task['Gluing'],
+                'assembling': task['Assembling'],
+                'edge_scrap': task['EdgeScrap'],
+                'open_paper': task['OpenPaper'],
+                'quality_control': task['QualityControl'],
+                'duration': task['DurationSlot'],
+            }
+            
+            # Process requirements
+            requirements = []
+            if not pd.isna(task['Requirements']):
+                requirements = [req.strip() for req in str(task['Requirements']).split(',')]
+            
+            dependency_graph[task_id] = requirements
+            task_requirements_count[task_id] = len(requirements)
+    
+    # Flatten tasks from all products with quantities
     all_tasks = []
     for product, quantity in products_to_produce.items():
         product_tasks = products_df[products_df['Product'] == product].copy()
@@ -153,163 +218,125 @@ def assign_tasks(products_to_produce, workers_df, products_df, days=1):
                     'slot_assigned': None
                 })
     
-    # Sort tasks by requirements (tasks with no requirements first)
-    all_tasks.sort(key=lambda x: 0 if not x['requirements'] or pd.isna(x['requirements']) else 1)
-    
-    # Group similar tasks by their attributes
+    # Group similar tasks by their attributes for fixed role assignment
     task_groups = {}
     for task in all_tasks:
+        if task['assigned']:
+            continue
+            
         key = (task['bending'], task['gluing'], task['assembling'], 
                task['edge_scrap'], task['open_paper'], task['quality_control'])
         if key not in task_groups:
             task_groups[key] = []
         task_groups[key].append(task)
     
-    # Find the most common task attribute group to prioritize fixed workers
-    group_counts = {k: len(v) for k, v in task_groups.items()}
-    if group_counts:
-        most_common_group = max(group_counts, key=group_counts.get)
-        most_common_tasks = task_groups[most_common_group]
-    else:
-        most_common_tasks = []
+    # Identify starter tasks (tasks with no requirements) across all products
+    starter_tasks = {}
+    for task_id, reqs in dependency_graph.items():
+        if not reqs:  # No requirements
+            product = task_products[task_id]
+            if product not in starter_tasks:
+                starter_tasks[product] = []
+            starter_tasks[product].append(task_id)
     
-    # Assign worker roles based on preference and most common tasks
-    for _, worker in workers_df.iterrows():
-        flow_pref = worker['FlowPreference']
-        worker_name = worker['Worker']
-        
-        # Determine if worker should be fixed or flow based on their preference
-        if flow_pref > 0.6 and most_common_tasks:
-            worker_roles[worker_name] = 'fixed'
-        else:
-            worker_roles[worker_name] = 'flow'
-    
-    # Calculate how many fixed workers we need based on the task distribution
-    num_fixed_workers_needed = min(len(most_common_tasks) // 2 + 1, len(worker_roles))
-    
-    # Ensure we have enough fixed workers for the most common tasks
-    fixed_workers_count = sum(1 for role in worker_roles.values() if role == 'fixed')
-    
-    if fixed_workers_count < num_fixed_workers_needed:
-        # Convert some flow workers to fixed by preference
-        flow_workers = [w for w, r in worker_roles.items() if r == 'flow']
-        flow_workers.sort(key=lambda w: workers_df[workers_df['Worker'] == w]['FlowPreference'].iloc[0], reverse=True)
-        
-        for worker in flow_workers[:num_fixed_workers_needed - fixed_workers_count]:
-            worker_roles[worker] = 'fixed'
+    # Initial assignment of fixed workers to starter tasks
+    for worker_name, role in worker_roles.items():
+        if role == 'fixed':
+            worker_data = workers_df[workers_df['Worker'] == worker_name].iloc[0]
+            
+            # Find best starter task for this fixed worker
+            best_task_id = None
+            best_score = -1
+            
+            for product, task_ids in starter_tasks.items():
+                for task_id in task_ids:
+                    task_detail = task_details[task_id]
+                    
+                    # Calculate skill match
+                    skill_score = calculate_skill_match(
+                        worker_data,
+                        {
+                            'Bending': task_detail['bending'],
+                            'Gluing': task_detail['gluing'],
+                            'Assembling': task_detail['assembling'],
+                            'EdgeScrap': task_detail['edge_scrap'],
+                            'OpenPaper': task_detail['open_paper'],
+                            'QualityControl': task_detail['quality_control']
+                        }
+                    )
+                    
+                    # Product preference
+                    product_pref = 0
+                    if product == worker_data['FavoriteProduct1']:
+                        product_pref = 0.1
+                    elif product == worker_data['FavoriteProduct2']:
+                        product_pref = 0.05
+                    
+                    # Final score
+                    final_score = skill_score + product_pref
+                    
+                    if final_score > best_score:
+                        best_score = final_score
+                        best_task_id = task_id
+            
+            if best_task_id:
+                # Assign this task type to the worker
+                worker_stats[worker_name]['fixed_tasks'].add(best_task_id)
     
     # Process each day
     for day in range(1, days + 1):
         # Process each time slot in the day
         for slot_idx, time_slot in enumerate(time_slots):
             # Find available workers for this time slot
-            available_workers = [worker for worker in workers_df['Worker'] if schedule[day][worker][time_slot] is None]
+            available_workers = [worker for worker in workers_df['Worker'] 
+                                if schedule[day][worker][time_slot] is None]
             
             if not available_workers:
                 continue
+            
+            # Update which tasks have their requirements met based on completed tasks
+            eligible_tasks = []
+            for task in all_tasks:
+                if task['assigned']:
+                    continue
+                    
+                # Check if requirements are met
+                requirements_met = check_requirements_met(
+                    completed_tasks, task['requirements']
+                )
                 
-            # Find tasks whose requirements are met
-            eligible_tasks = [task for task in all_tasks 
-                             if not task['assigned'] and check_requirements_met(completed_tasks, task['requirements'])]
+                if requirements_met:
+                    eligible_tasks.append(task)
             
             if not eligible_tasks:
                 continue
             
-            # Group eligible tasks by their attribute similarities
-            eligible_groups = {}
-            for task in eligible_tasks:
-                key = (task['bending'], task['gluing'], task['assembling'], 
-                       task['edge_scrap'], task['open_paper'], task['quality_control'])
-                if key not in eligible_groups:
-                    eligible_groups[key] = []
-                eligible_groups[key].append(task)
-            
-            # First, assign fixed workers to their preferred task groups
+            # First, handle fixed workers
             for worker_name in [w for w in available_workers if worker_roles[w] == 'fixed']:
                 worker_data = workers_df[workers_df['Worker'] == worker_name].iloc[0]
+                fixed_tasks = worker_stats[worker_name]['fixed_tasks']
                 
-                # If worker already has a fixed task, continue with it if possible
-                if worker_stats[worker_name]['fixed_task'] is not None:
-                    fixed_task_key = (
-                        worker_stats[worker_name]['fixed_task']['bending'],
-                        worker_stats[worker_name]['fixed_task']['gluing'],
-                        worker_stats[worker_name]['fixed_task']['assembling'],
-                        worker_stats[worker_name]['fixed_task']['edge_scrap'],
-                        worker_stats[worker_name]['fixed_task']['open_paper'],
-                        worker_stats[worker_name]['fixed_task']['quality_control']
-                    )
-                    
-                    # Check if there are eligible tasks of the same type
-                    if fixed_task_key in eligible_groups and eligible_groups[fixed_task_key]:
-                        best_task = eligible_groups[fixed_task_key][0]
-                        
-                        # Check if task fits in remaining slots
-                        remaining_slots = len(time_slots) - slot_idx
-                        if best_task['duration'] <= remaining_slots:
-                            # Assign task for its duration
-                            for i in range(int(best_task['duration'])):
-                                if slot_idx + i < len(time_slots):
-                                    current_slot = time_slots[slot_idx + i]
-                                    schedule[day][worker_name][current_slot] = {
-                                        'product': best_task['product'],
-                                        'task': best_task['task_name'],
-                                        'task_id': best_task['task_id'],
-                                        'role': 'fixed'
-                                    }
-                            
-                            # Update worker stats
-                            best_task['assigned'] = True
-                            best_task['day_assigned'] = day
-                            best_task['slot_assigned'] = slot_idx
-                            completed_tasks.add(best_task['task_id'])
-                            worker_stats[worker_name]['task_history'].append(best_task)
-                            worker_stats[worker_name]['completed_products'][best_task['product']] += 1
-                            worker_stats[worker_name]['total_tasks_completed'] += 1
-                            worker_stats[worker_name]['fixed_task_count'] += 1
-                            
-                            # Remove the assigned task from eligible tasks
-                            eligible_tasks.remove(best_task)
-                            eligible_groups[fixed_task_key].remove(best_task)
-                            continue
-                
-                # If no fixed task or no eligible tasks of the same type, find a new task
+                # Find best task for this fixed worker
                 best_task = None
-                best_score = -1
                 
-                # Prioritize tasks from most common group for fixed workers
-                for group_key, group_tasks in eligible_groups.items():
-                    if not group_tasks:
-                        continue
+                # First priority: continue with assigned fixed tasks
+                if fixed_tasks:
+                    for task in eligible_tasks:
+                        if task['task_id'] in fixed_tasks:
+                            best_task = task
+                            break
+                
+                # If no assigned fixed task is eligible, find a new task to assign
+                if not best_task and len(fixed_tasks) < 2:  # Limit fixed tasks per worker
+                    # Prioritize starter tasks
+                    starter_task_ids = [task_id for product_tasks in starter_tasks.values() 
+                                      for task_id in product_tasks]
                     
-                    # Calculate group score based on number of tasks and skill match
-                    group_size_score = len(group_tasks) / len(eligible_tasks)
-                    
-                    # Calculate skill match for this group
-                    skill_score = calculate_skill_match(
-                        worker_data,
-                        {
-                            'Bending': group_tasks[0]['bending'],
-                            'Gluing': group_tasks[0]['gluing'],
-                            'Assembling': group_tasks[0]['assembling'],
-                            'EdgeScrap': group_tasks[0]['edge_scrap'],
-                            'OpenPaper': group_tasks[0]['open_paper'],
-                            'QualityControl': group_tasks[0]['quality_control']
-                        }
-                    )
-                    
-                    # Calculate product preference
-                    product_pref = 0
-                    if group_tasks[0]['product'] == worker_data['FavoriteProduct1']:
-                        product_pref = 0.1
-                    elif group_tasks[0]['product'] == worker_data['FavoriteProduct2']:
-                        product_pref = 0.05
-                    
-                    # Calculate final score with emphasis on group size for fixed workers
-                    final_score = skill_score * 0.4 + group_size_score * 0.5 + product_pref
-                    
-                    if final_score > best_score:
-                        best_score = final_score
-                        best_task = group_tasks[0]
+                    for task in eligible_tasks:
+                        if task['task_id'] in starter_task_ids:
+                            best_task = task
+                            worker_stats[worker_name]['fixed_tasks'].add(task['task_id'])
+                            break
                 
                 # Assign the best task if found
                 if best_task:
@@ -327,38 +354,39 @@ def assign_tasks(products_to_produce, workers_df, products_df, days=1):
                                     'role': 'fixed'
                                 }
                         
-                        # Update worker stats
+                        # Update tracking
                         best_task['assigned'] = True
                         best_task['day_assigned'] = day
                         best_task['slot_assigned'] = slot_idx
                         completed_tasks.add(best_task['task_id'])
+                        task_completion_counts[best_task['task_id']] += 1
                         worker_stats[worker_name]['task_history'].append(best_task)
                         worker_stats[worker_name]['completed_products'][best_task['product']] += 1
                         worker_stats[worker_name]['total_tasks_completed'] += 1
-                        worker_stats[worker_name]['fixed_task'] = best_task
-                        worker_stats[worker_name]['fixed_task_count'] = 1
                         
-                        # Remove the assigned task from eligible tasks
-                        task_key = (
-                            best_task['bending'],
-                            best_task['gluing'],
-                            best_task['assembling'],
-                            best_task['edge_scrap'],
-                            best_task['open_paper'],
-                            best_task['quality_control']
-                        )
+                        # Remove assigned task from eligible tasks
                         eligible_tasks.remove(best_task)
-                        eligible_groups[task_key].remove(best_task)
             
-            # Then assign flow workers to tasks that need completion
+            # Then handle flow workers
             for worker_name in [w for w in available_workers if worker_roles[w] == 'flow' and schedule[day][w][time_slot] is None]:
                 worker_data = workers_df[workers_df['Worker'] == worker_name].iloc[0]
                 
-                # Find best task based on skill match and product flow
+                # Flow workers prioritize advancing the product flow
                 best_task = None
                 best_score = -1
+                current_product = None
+                
+                # Check if worker is in the middle of a product flow
+                if worker_stats[worker_name]['task_history']:
+                    last_task = worker_stats[worker_name]['task_history'][-1]
+                    current_product = last_task['product']
                 
                 for task in eligible_tasks:
+                    # Prioritize continuing current product flow first
+                    product_continuation = 0
+                    if current_product and task['product'] == current_product:
+                        product_continuation = 0.3
+                    
                     # Calculate skill match
                     skill_score = calculate_skill_match(
                         worker_data, 
@@ -372,22 +400,20 @@ def assign_tasks(products_to_produce, workers_df, products_df, days=1):
                         }
                     )
                     
-                    # Prioritize tasks that continue the product flow
-                    flow_score = 0
-                    if worker_stats[worker_name]['task_history']:
-                        last_task = worker_stats[worker_name]['task_history'][-1]
-                        if last_task['product'] == task['product']:
-                            flow_score = 0.3
+                    # Prioritize advancing tasks (higher in dependency chain)
+                    advancement_score = 0
+                    if not pd.isna(task['requirements']) and task['requirements']:
+                        advancement_score = 0.2
                     
-                    # Prioritize favorite products
+                    # Product preference
                     product_pref = 0
                     if task['product'] == worker_data['FavoriteProduct1']:
                         product_pref = 0.1
                     elif task['product'] == worker_data['FavoriteProduct2']:
                         product_pref = 0.05
                     
-                    # Final score with emphasis on skill and flow
-                    final_score = skill_score * 0.6 + flow_score + product_pref
+                    # Final score with emphasis on flow and advancement
+                    final_score = skill_score * 0.4 + product_continuation + advancement_score + product_pref
                     
                     if final_score > best_score:
                         best_score = final_score
@@ -409,29 +435,18 @@ def assign_tasks(products_to_produce, workers_df, products_df, days=1):
                                     'role': 'flow'
                                 }
                         
-                        # Update worker stats
+                        # Update tracking
                         best_task['assigned'] = True
                         best_task['day_assigned'] = day
                         best_task['slot_assigned'] = slot_idx
                         completed_tasks.add(best_task['task_id'])
+                        task_completion_counts[best_task['task_id']] += 1
                         worker_stats[worker_name]['task_history'].append(best_task)
                         worker_stats[worker_name]['completed_products'][best_task['product']] += 1
                         worker_stats[worker_name]['total_tasks_completed'] += 1
                         
-                        # Remove the assigned task from eligible tasks
+                        # Remove assigned task from eligible tasks
                         eligible_tasks.remove(best_task)
-                        
-                        # Remove from eligible groups as well
-                        task_key = (
-                            best_task['bending'],
-                            best_task['gluing'],
-                            best_task['assembling'],
-                            best_task['edge_scrap'],
-                            best_task['open_paper'],
-                            best_task['quality_control']
-                        )
-                        if task_key in eligible_groups and best_task in eligible_groups[task_key]:
-                            eligible_groups[task_key].remove(best_task)
     
     # Calculate task completion statistics
     completion_stats = {
@@ -444,7 +459,7 @@ def assign_tasks(products_to_produce, workers_df, products_df, days=1):
         'worker_tasks': {worker: worker_stats[worker]['total_tasks_completed'] for worker in workers_df['Worker']}
     }
     
-    return schedule, completion_stats, worker_stats
+    return schedule, completion_stats, worker_stats, worker_roles, days
 
 def get_table_download_link(df, filename, text):
     """Generate a link to download the dataframe as a CSV file"""
@@ -479,11 +494,11 @@ if page == "Home":
     st.markdown("""
     ### How it works
     
-    1. **Product Database**: View and manage products and their production tasks
-    2. **Worker Database**: Manage worker profiles and their skill attributes
-    3. **Production Order**: Create production orders and generate optimized schedules
+    1. *Product Database*: View and manage products and their production tasks
+    2. *Worker Database*: Manage worker profiles and their skill attributes
+    3. *Production Order*: Create production orders and generate optimized schedules
     
-    Get started by navigating to the **Production Order** page to create your first optimized schedule.
+    Get started by navigating to the *Production Order* page to create your first optimized schedule.
     """)
 
 elif page == "Product Database":
@@ -494,7 +509,7 @@ elif page == "Product Database":
     
     # Group products and show their tasks
     for product in unique_products:
-        with st.expander(f"**{product}**"):
+        with st.expander(f"{product}"):
             product_tasks = products_df[products_df['Product'] == product]
             st.dataframe(product_tasks)
             
@@ -563,7 +578,7 @@ elif page == "Worker Database":
     workers_display = workers_df.copy()
     
     for _, worker in workers_df.iterrows():
-        with st.expander(f"**{worker['Worker']}**"):
+        with st.expander(f"{worker['Worker']}"):
             col1, col2 = st.columns([3, 2])
             
             with col1:
@@ -588,7 +603,7 @@ elif page == "Worker Database":
             
             with col2:
                 # Display worker preferences
-                st.write("**Flow/Fixed Preference:**")
+                st.write("*Flow/Fixed Preference:*")
                 pref_chart = alt.Chart(pd.DataFrame({
                     'Type': ['Flow', 'Fixed'],
                     'Score': [worker['FlowPreference'], 1 - worker['FlowPreference']]
@@ -603,7 +618,7 @@ elif page == "Worker Database":
                 
                 st.altair_chart(pref_chart)
                 
-                st.write("**Product Preferences:**")
+                st.write("*Product Preferences:*")
                 st.write(f"1. {worker['FavoriteProduct1']}")
                 st.write(f"2. {worker['FavoriteProduct2']}")
                 st.write(f"3. {worker['FavoriteProduct3']}")
@@ -615,6 +630,7 @@ elif page == "Production Order":
     ### Create a production order to generate an optimized schedule
     
     Select products and quantities, then customize parameters to generate an optimized work schedule.
+    Production days will be automatically calculated based on your order size and worker availability.
     """)
     
     # Create form for production order
@@ -639,7 +655,6 @@ elif page == "Production Order":
         col1, col2 = st.columns(2)
         
         with col1:
-            days = st.slider("Production Days", min_value=1, max_value=5, value=1)
             worker_allocation = st.slider("Worker Role Balance (Flow vs Fixed)", 
                                          min_value=0, max_value=100, value=50,
                                          help="0 = All Flow, 100 = All Fixed")
@@ -675,13 +690,13 @@ elif page == "Production Order":
                 time.sleep(0.01)
                 progress_bar.progress(i + 1)
             
-            # Generate schedule
-            schedule, completion_stats, worker_stats = assign_tasks(
-                product_quantities, available_workers_df, products_df, days
+            # Generate schedule with auto-calculated days
+            schedule, completion_stats, worker_stats, worker_roles, days = assign_tasks(
+                product_quantities, available_workers_df, products_df, None
             )
         
         # Display results
-        st.success(f"Schedule generated! Task completion: {completion_stats['completion_percentage']:.1f}%")
+        st.success(f"Schedule generated for {days} days! Task completion: {completion_stats['completion_percentage']:.1f}%")
         
         # Display task completion metrics
         st.markdown('<div class="sub-header">Task Completion</div>', unsafe_allow_html=True)
@@ -690,190 +705,174 @@ elif page == "Production Order":
         
         with col1:
             st.metric("Total Tasks", completion_stats['total_tasks'])
-            
+        
         with col2:
             st.metric("Completed Tasks", completion_stats['completed_tasks'])
-            
+        
         with col3:
             st.metric("Completion Rate", f"{completion_stats['completion_percentage']:.1f}%")
         
-        # Task completion by product
-        st.markdown("#### Tasks by Product")
+        # Display product completion
+        st.markdown('<div class="sub-header">Product Completion</div>', unsafe_allow_html=True)
         
-        product_cols = st.columns(len(product_quantities))
-        for i, (product, count) in enumerate(completion_stats['tasks_by_product'].items()):
-            with product_cols[i % len(product_cols)]:
-                total_product_tasks = sum(1 for task in products_df[products_df['Product'] == product]) * product_quantities[product]
-                completion = (count / total_product_tasks) * 100 if total_product_tasks > 0 else 0
-                st.metric(product, f"{count}/{total_product_tasks}", f"{completion:.1f}%")
+        product_completion = pd.DataFrame({
+            'Product': list(completion_stats['tasks_by_product'].keys()),
+            'Tasks Completed': list(completion_stats['tasks_by_product'].values())
+        })
         
-        # Worker assignment visualization
-        st.markdown('<div class="sub-header">Worker Assignments</div>', unsafe_allow_html=True)
+        st.dataframe(product_completion)
+        
+        # Display worker performance as a table instead of bar graphs
+        st.markdown('<div class="sub-header">Worker Performance</div>', unsafe_allow_html=True)
+        
+        # Create worker performance dataframe
+        worker_performance = []
+        for worker_name in worker_availability:
+            # Calculate products completed
+            products_completed = dict(worker_stats[worker_name]['completed_products'])
+            product_str = ", ".join([f"{p}: {c}" for p, c in products_completed.items() if c > 0])
+            
+            # Get worker role
+            role = worker_roles.get(worker_name, "flow")  # Default to flow if not found
+            
+            worker_performance.append({
+                'Worker': worker_name,
+                'Role': role.capitalize(),
+                'Tasks Completed': worker_stats[worker_name]['total_tasks_completed'],
+                'Products Completed': product_str
+            })
+        
+        performance_df = pd.DataFrame(worker_performance)
+        st.dataframe(performance_df)
+        
+        # Display daily schedule
+        st.markdown('<div class="sub-header">Daily Schedule</div>', unsafe_allow_html=True)
         
         # Create tabs for each day
         day_tabs = st.tabs([f"Day {day}" for day in range(1, days + 1)])
         
-        # Process each day
-        time_slots = generate_time_slots(8, 16)
-        
         for day_idx, day_tab in enumerate(day_tabs):
             day = day_idx + 1
-            
             with day_tab:
-                # Create a pivoted schedule table with workers as columns
-                # First, create a dictionary to store task information
-                worker_schedule = {}
+                # Convert schedule to DataFrame for easier display
+                day_schedule_data = []
                 
-                # Initialize with all time slots for each worker
                 for worker in worker_availability:
-                    worker_schedule[worker] = {slot: "" for slot in time_slots}
+                    for time_slot in generate_time_slots(8, 16):
+                        task_info = schedule[day][worker][time_slot]
+                        if task_info:
+                            day_schedule_data.append({
+                                'Worker': worker,
+                                'Time': time_slot,
+                                'Product': task_info['product'],
+                                'Task': task_info['task'],
+                                'TaskID': task_info['task_id'],
+                                'Role': task_info['role']
+                            })
                 
-                # Fill in the tasks
-                for worker, slots in schedule[day].items():
-                    for slot, task in slots.items():
-                        if task is not None:
-                            # Create a formatted task string with product and task info
-                            task_info = f"{task['product']} - {task['task']}"
-                            worker_schedule[worker][slot] = task_info
-                
-                # Create a DataFrame with time slots as rows and workers as columns
-                schedule_table = pd.DataFrame({
-                    'Time': time_slots
-                })
-                
-                # Add a column for each worker
-                for worker in worker_availability:
-                    schedule_table[worker] = schedule_table['Time'].map(worker_schedule[worker])
-                
-                # Set Time as index to make it the first column
-                schedule_table = schedule_table.set_index('Time')
-                
-                # Display the table
-                st.markdown(f"### Day {day} Schedule")
-                st.dataframe(schedule_table, use_container_width=True)
-                
-                # Add a color legend for worker roles
-                role_legend = ""
-                for worker in worker_availability:
-                    role = worker_roles[worker] if 'worker_roles' in locals() else "Unknown"
-                    role_color = "#1976D2" if role == "fixed" else "#43A047"
-                    role_legend += f'<span style="color:{role_color}">■</span> {worker}: {role.capitalize()} &nbsp;&nbsp;'
-                
-                st.markdown(f"<div style='font-size:0.8em'>{role_legend}</div>", unsafe_allow_html=True)
+                if day_schedule_data:
+                    day_df = pd.DataFrame(day_schedule_data)
                     
-                    # Create worker role indicators
-                st.markdown("#### Worker Roles")
-                role_cols = st.columns(len(worker_availability))
+                    # Create a pivot table with Time as rows and Worker as columns
+                    pivot_df = day_df.pivot(index='Time', columns='Worker', values='Task')
                     
-                for i, worker in enumerate(worker_availability):
-                        with role_cols[i % len(role_cols)]:
-                            role = worker_roles[worker] if 'worker_roles' in locals() else "Unknown"
-                            role_class = "fixed-role" if role == "fixed" else "flow-role"
-                            st.markdown(f"""
-                            <div class="{role_class}">
-                                <b>{worker}</b>: {role.capitalize()} Worker
-                            </div>
-                            """, unsafe_allow_html=True)
+                    # Apply styling
+                    def color_cells(val):
+                        if pd.isna(val):
+                            return ''
+                        
+                        role_info = day_df[(day_df['Worker'] == pivot_df.columns.name) & 
+                                          (day_df['Time'] == pivot_df.index.name) & 
+                                          (day_df['Task'] == val)]
+                        
+                        if not role_info.empty:
+                            role = role_info.iloc[0]['Role']
+                            product = role_info.iloc[0]['Product']
+                            
+                            # Different colors for fixed vs flow roles
+                            if role == 'fixed':
+                                return f'background-color: #e3f2fd; border-left: 3px solid #1976D2;'
+                            else:
+                                return f'background-color: #e8f5e9; border-left: 3px solid #43A047;'
+                        return ''
+                    
+                    # Format the pivot table to show task details on hover
+                    def format_tasks(val):
+                        if pd.isna(val):
+                            return ''
+                        
+                        task_info = day_df[(day_df['Worker'] == pivot_df.columns.name) & 
+                                          (day_df['Time'] == pivot_df.index.name) & 
+                                          (day_df['Task'] == val)]
+                        
+                        if not task_info.empty:
+                            product = task_info.iloc[0]['Product']
+                            return f"{product}: {val}"
+                        return val
+                    
+                    # Display pivoted schedule
+                    styled_pivot = pivot_df.style.applymap(color_cells)
+                    
+                    # Add tooltip with task details
+                    task_details = {}
+                    for _, row in day_df.iterrows():
+                        task_details[(row['Time'], row['Worker'])] = f"{row['Product']}: {row['Task']}"
+                    
+                    st.dataframe(styled_pivot, height=600)
+                    
+                    # Create downloadable CSV
+                    st.markdown(get_table_download_link(day_df, f"day_{day}_schedule.csv", f"Download Day {day} Schedule"), unsafe_allow_html=True)
                 else:
                     st.info(f"No tasks scheduled for Day {day}")
         
-        # Display detailed worker statistics
-        st.markdown('<div class="sub-header">Worker Performance</div>', unsafe_allow_html=True)
+        # Create overall schedule download
+        all_schedule_data = []
+        for day in range(1, days + 1):
+            for worker in worker_availability:
+                for time_slot in generate_time_slots(8, 16):
+                    task_info = schedule[day][worker][time_slot]
+                    if task_info:
+                        all_schedule_data.append({
+                            'Day': day,
+                            'Worker': worker,
+                            'Time': time_slot,
+                            'Product': task_info['product'],
+                            'Task': task_info['task'],
+                            'TaskID': task_info['task_id'],
+                            'Role': task_info['role']
+                        })
         
-        # Create worker performance metrics
-        perf_data = []
-        for worker, stats in worker_stats.items():
-            if worker in worker_availability:
-                # Make sure we have some data to display
-                tasks_completed = stats['total_tasks_completed'] if 'total_tasks_completed' in stats else 0
-                role = worker_roles[worker] if 'worker_roles' in locals() else "Unknown"
-                perf_data.append({
-                    'Worker': worker,
-                    'Tasks Completed': tasks_completed,
-                    'Products Worked': len(stats['completed_products']) if 'completed_products' in stats else 0,
-                    'Role': role
-                })
-        
-        if perf_data:
-            perf_df = pd.DataFrame(perf_data)
-            
-            # Ensure there's actual data to display
-            if not perf_df.empty and perf_df['Tasks Completed'].sum() > 0:
-                # Create a simple bar chart with Altair
-                perf_chart = alt.Chart(perf_df).mark_bar().encode(
-                    x=alt.X('Worker:N', sort='-y', title='Worker'),
-                    y=alt.Y('Tasks Completed:Q', title='Tasks Completed'),
-                    color=alt.Color('Role:N', scale=alt.Scale(domain=['fixed', 'flow'], 
-                                                             range=['#1976D2', '#43A047'])),
-                    tooltip=['Worker', 'Tasks Completed', 'Products Worked', 'Role']
-                ).properties(
-                    width=600,
-                    height=300,
-                    title="Worker Task Completion"
-                )
-                
-                st.altair_chart(perf_chart, use_container_width=True)
-            else:
-                # As a backup, display a simple table
-                st.warning("Not enough task completion data to generate chart. Displaying data table instead.")
-                st.dataframe(perf_df, use_container_width=True)
-            
-            # Also display the data as a table for clarity
-            st.subheader("Worker Performance Details")
-            st.dataframe(perf_df, use_container_width=True)
-        else:
-            st.warning("No worker performance data available.")
-            
-            # Create a download link for the schedule
-            schedule_export = []
-            for day in range(1, days + 1):
-                for worker, slots in schedule[day].items():
-                    for slot, task in slots.items():
-                        if task is not None:
-                            schedule_export.append({
-                                'Day': day,
-                                'Worker': worker,
-                                'Time': slot,
-                                'Product': task['product'],
-                                'Task': task['task'],
-                                'TaskID': task['task_id'],
-                                'Role': task['role']
-                            })
-            
-            if schedule_export:
-                export_df = pd.DataFrame(schedule_export)
-                st.markdown(get_table_download_link(export_df, 'schedule.csv', 'Download Schedule CSV'), unsafe_allow_html=True)
+        if all_schedule_data:
+            all_schedule_df = pd.DataFrame(all_schedule_data)
+            st.markdown(get_table_download_link(all_schedule_df, "complete_schedule.csv", "Download Complete Schedule"), unsafe_allow_html=True)
 
 elif page == "About":
-    st.markdown('<div class="main-header">About this Application</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">About the System</div>', unsafe_allow_html=True)
     
     st.markdown("""
     ### Task Auto-Assignment System
     
-    This application helps manufacturing facilities optimize their production scheduling by automatically assigning tasks to workers based on skills, preferences, and task requirements.
+    This system helps production managers optimize their workforce allocation by:
     
-    #### Key Features:
+    1. *Auto-calculating* production days needed based on order volume
+    2. *Optimizing* worker assignments based on their skills and preferences
+    3. *Balancing* fixed and flow roles for maximum efficiency
+    4. *Respecting* task dependencies and requirements
     
-    1. **Smart Worker Allocation**: Automatically assigns workers to tasks based on skill matching and preferences
-    2. **Dual Work Mode**: Supports both "fixed" workers (who repeat similar tasks) and "flow" workers (who follow product progression)
-    3. **Task Dependencies**: Respects the required order of operations for each product
-    4. **Schedule Visualization**: Clear timeline view of worker assignments
-    5. **Performance Metrics**: Track completion rates and worker productivity
+    #### Key Features
     
-    #### How the Algorithm Works:
+    - *Fixed vs Flow Roles*: Workers can be assigned to fixed roles (repeating similar tasks) or flow roles (following product flow)
+    - *Skill Matching*: Tasks are assigned based on worker skills and preferences
+    - *Product Continuity*: The system tries to keep workers on the same product when beneficial
+    - *Task Grouping*: Similar tasks are grouped together for efficiency
     
-    1. Tasks are grouped by their skill requirements to identify commonalities
-    2. Workers are assigned "fixed" or "flow" roles based on task distribution and preferences
-    3. Fixed workers are assigned to groups of similar tasks to maximize efficiency through repetition
-    4. Flow workers follow product progression, focusing on completing products in sequence
-    5. All task dependencies are respected to ensure quality production
+    #### How to Use
     
-    #### Using the Application:
+    1. Start by creating a production order on the Production Order page
+    2. Select products and quantities
+    3. Customize worker availability if needed
+    4. Generate an optimized schedule
+    5. View and download the schedule
+    """)
     
-    1. Navigate to the **Production Order** page
-    2. Select products and quantities for production
-    3. Set schedule parameters like production days and worker availability
-    4. Generate and analyze the optimized schedule
-    5. Export the schedule for implementation
-    """,unsafe_allow_html=True)
-    
+    st.image("https://cdn.pixabay.com/photo/2018/01/18/21/50/scheduling-3091268_1280.png", width=500)
