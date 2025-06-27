@@ -7,6 +7,7 @@ import time
 import io
 import base64
 import math
+import os # Pastikan ini diimpor untuk operasi file
 
 # Set page configuration
 st.set_page_config(
@@ -16,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS to fix layout issues
+# Custom CSS to fix layout issues and add CRUD styling
 st.markdown("""
 <style>
     .main .block-container {
@@ -72,7 +73,34 @@ st.markdown("""
     /* Force full width for schedule content */
     .stDataFrame > div {
         width: 100% !important;
-        max-width: none !important;
+        max_width: none !important;
+    }
+    
+    /* Gaya Formulir CRUD */
+    .crud-section {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 20px;
+        margin: 10px 0;
+        background-color: #f8f9fa;
+    }
+    
+    .success-box {
+        padding: 10px;
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+        color: #155724;
+        margin: 10px 0;
+    }
+    
+    .error-box {
+        padding: 10px;
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        color: #721c24;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -114,7 +142,12 @@ class WorkerSimulationData:
             "OpenPaper": worker_row["OpenPaper"],
             "QualityControl": worker_row["QualityControl"],
         }
-        self.favorite_products = [worker_row["FavoriteProduct1"], worker_row["FavoriteProduct2"], worker_row["FavoriteProduct3"]]
+        # Handle potential NaN in favorite products
+        self.favorite_products = [
+            str(worker_row["FavoriteProduct1"]) if pd.notna(worker_row["FavoriteProduct1"]) else "",
+            str(worker_row["FavoriteProduct2"]) if pd.notna(worker_row["FavoriteProduct2"]) else "",
+            str(worker_row["FavoriteProduct3"]) if pd.notna(worker_row["FavoriteProduct3"]) else ""
+        ]
         
         # Simulation state
         self.is_available = True
@@ -155,18 +188,184 @@ class TaskInstance:
     def __repr__(self):
         return f"TaskInstance(ID={self.instance_id}, TaskType={self.task_id}, Status={self.status}, Progress={self.progress_percentage:.1f}%)"
 
-# --- Data Loading ---
+# --- Data Loading (Diperbarui untuk membuat file jika tidak ada) ---
 @st.cache_data
 def load_data():
-    """Load data from CSV files in the same directory"""
+    """Memuat data dari file CSV di direktori yang sama.
+    Akan membuat file CSV kosong jika tidak ditemukan.
+    """
     try:
-        workers_df = pd.read_csv("workers.csv")
-        products_df = pd.read_csv("products.csv")
+        # Muat data pekerja
+        if os.path.exists("workers.csv"):
+            workers_df = pd.read_csv("workers.csv")
+        else:
+            # Buat file pekerja default jika tidak ada
+            workers_df = pd.DataFrame(columns=[
+                "Worker", "Bending", "Gluing", "Assembling", "EdgeScrap",
+                "OpenPaper", "QualityControl", "FavoriteProduct1",
+                "FavoriteProduct2", "FavoriteProduct3"
+            ])
+            workers_df.to_csv("workers.csv", index=False)
+        
+        # Muat data produk
+        if os.path.exists("products.csv"):
+            products_df = pd.read_csv("products.csv")
+        else:
+            # Buat file produk default jika tidak ada
+            products_df = pd.DataFrame(columns=[
+                "Product", "Task", "Result", "Requirements", "Bending", 
+                "Gluing", "Assembling", "EdgeScrap", "OpenPaper", 
+                "QualityControl", "DurationSlot"
+            ])
+            products_df.to_csv("products.csv", index=False)
+            
         return workers_df, products_df
-    except FileNotFoundError as e:
-        st.error(f"File not found: {e}")
-        st.error("Make sure 'workers.csv' dan 'products.csv' is in the same directory as this application.")
+    except Exception as e:
+        st.error(f"Error memuat data: {e}")
         st.stop()
+
+# --- Fungsi CRUD (Logika Data) ---
+def save_workers_data(workers_df_to_save):
+    """Menyimpan data pekerja ke CSV"""
+    try:
+        workers_df_to_save.to_csv("workers.csv", index=False)
+        st.cache_data.clear() # Hapus cache data setelah perubahan
+        return True
+    except Exception as e:
+        st.error(f"Error menyimpan data pekerja: {e}")
+        return False
+
+def save_products_data(products_df_to_save):
+    """Menyimpan data produk ke CSV"""
+    try:
+        products_df_to_save.to_csv("products.csv", index=False)
+        st.cache_data.clear() # Hapus cache data setelah perubahan
+        return True
+    except Exception as e:
+        st.error(f"Error menyimpan data produk: {e}")
+        return False
+
+def add_worker(current_workers_df, worker_data):
+    """Menambahkan pekerja baru ke dataframe"""
+    try:
+        # Periksa apakah pekerja sudah ada
+        if worker_data["Worker"] in current_workers_df["Worker"].values:
+            return False, "Pekerja dengan nama ini sudah ada!"
+        
+        # Tambahkan pekerja baru
+        new_worker_df = pd.DataFrame([worker_data])
+        updated_df = pd.concat([current_workers_df, new_worker_df], ignore_index=True)
+        
+        # Simpan ke CSV
+        if save_workers_data(updated_df):
+            return True, "Pekerja berhasil ditambahkan!"
+        else:
+            return False, "Gagal menyimpan data pekerja!"
+            
+    except Exception as e:
+        return False, f"Error menambahkan pekerja: {e}"
+
+def update_worker(current_workers_df, old_name, worker_data):
+    """Memperbarui pekerja yang sudah ada"""
+    try:
+        # Temukan indeks pekerja
+        worker_index = current_workers_df[current_workers_df["Worker"] == old_name].index
+        
+        if len(worker_index) == 0:
+            return False, "Pekerja tidak ditemukan!"
+        
+        # Update worker data
+        for col, value in worker_data.items():
+            current_workers_df.loc[worker_index[0], col] = value
+        
+        # Simpan ke CSV
+        if save_workers_data(current_workers_df):
+            return True, "Pekerja berhasil diperbarui!"
+        else:
+            return False, "Gagal menyimpan data pekerja!"
+            
+    except Exception as e:
+        return False, f"Error memperbarui pekerja: {e}"
+
+def delete_worker(current_workers_df, worker_name):
+    """Menghapus pekerja dari dataframe"""
+    try:
+        # Check if worker exists
+        if worker_name not in current_workers_df["Worker"].values:
+            return False, "Pekerja tidak ditemukan!"
+        
+        # Remove worker
+        updated_df = current_workers_df[current_workers_df["Worker"] != worker_name].reset_index(drop=True)
+        
+        # Save to CSV
+        if save_workers_data(updated_df):
+            return True, "Pekerja berhasil dihapus!"
+        else:
+            return False, "Gagal menyimpan data pekerja!"
+            
+    except Exception as e:
+        return False, f"Error menghapus pekerja: {e}"
+
+def add_product(current_products_df, product_data):
+    """Menambahkan produk baru ke dataframe"""
+    try:
+        # Periksa apakah ID hasil produk sudah ada
+        if product_data["Result"] in current_products_df["Result"].values:
+            return False, "Tugas produk dengan ID Hasil ini sudah ada!"
+        
+        # Tambahkan produk baru
+        new_product_df = pd.DataFrame([product_data])
+        updated_df = pd.concat([current_products_df, new_product_df], ignore_index=True)
+        
+        # Simpan ke CSV
+        if save_products_data(updated_df):
+            return True, "Tugas produk berhasil ditambahkan!"
+        else:
+            return False, "Gagal menyimpan data produk!"
+            
+    except Exception as e:
+        return False, f"Error menambahkan produk: {e}"
+
+def update_product(current_products_df, old_result_id, product_data):
+    """Memperbarui produk yang sudah ada"""
+    try:
+        # Temukan indeks produk
+        product_index = current_products_df[current_products_df["Result"] == old_result_id].index
+        
+        if len(product_index) == 0:
+            return False, "Tugas produk tidak ditemukan!"
+        
+        # Perbarui data produk
+        for col, value in product_data.items():
+            current_products_df.loc[product_index[0], col] = value
+        
+        # Simpan ke CSV
+        if save_products_data(current_products_df):
+            return True, "Tugas produk berhasil diperbarui!"
+        else:
+            return False, "Gagal menyimpan data produk!"
+            
+    except Exception as e:
+        return False, f"Error memperbarui produk: {e}"
+
+def delete_product(current_products_df, result_id):
+    """Menghapus produk dari dataframe"""
+    try:
+        # Periksa apakah produk ada
+        if result_id not in current_products_df["Result"].values:
+            return False, "Tugas produk tidak ditemukan!"
+        
+        # Hapus produk
+        updated_df = current_products_df[current_products_df["Result"] != result_id].reset_index(drop=True)
+        
+        # Simpan ke CSV
+        if save_products_data(updated_df):
+            return True, "Tugas produk berhasil dihapus!"
+        else:
+            return False, "Gagal menyimpan data produk!"
+            
+    except Exception as e:
+        return False, f"Error menghapus produk: {e}"
 
 # Helper functions
 def calculate_skill_match(worker_skills, task_skill_requirements):
@@ -502,11 +701,12 @@ def display_schedule_gantt(schedule_data, estimated_days):
                             time_str = format_time(slot * 30)
                             row = {"TIME": time_str}
                             
-                            # Add worker columns only (no semi-finished column)
+                            # Add worker columns
                             for worker_name in sorted(day_schedule.keys()):
-                                if worker_name != "Available Semi-finished tasks" and isinstance(day_schedule[worker_name], dict):
+                                # Display "Available semi-finished tasks" as well
+                                if isinstance(day_schedule[worker_name], dict):
                                     task_desc = day_schedule[worker_name].get(slot, "idle")
-                                    row[f"Worker {worker_name}"] = task_desc
+                                    row[f"{worker_name}"] = task_desc # Menggunakan worker_name langsung sebagai judul kolom
                             
                             schedule_rows.append(row)
                         
@@ -532,7 +732,7 @@ def display_simulation_results(result):
         st.error("Simulation failed to be executed!")
         return
     
-    st.success(f"Simulation successfull! Estimated time: {result['estimated_days']} days")
+    st.success(f"Simulation successful! Estimated time: {result['estimated_days']} days")
     
     # Create tabs without Summary
     tab1, tab2, tab3 = st.tabs(["📅 Schedule", "👥 Worker Stats", "📝 Simulation Log"])
@@ -545,24 +745,365 @@ def display_simulation_results(result):
         
         worker_stats = []
         for worker_name, worker_data in result["worker_sim_data_map"].items():
-            completed_tasks = len([t for t in result["all_task_instances"] if t.assigned_worker_name == worker_name and t.status == "completed"])
+            # Calculate completed tasks
+            completed_tasks = sum(1 for ti in result["all_task_instances"] 
+                                if ti.assigned_worker_name == worker_name and ti.status == "completed")
+            
+            # Calculate total working time
+            total_working_time = sum(ti.duration_slot * 30 for ti in result["all_task_instances"] 
+                                   if ti.assigned_worker_name == worker_name and ti.status == "completed")
+            
+            # Calculate average skill utilization
+            relevant_tasks = [ti for ti in result["all_task_instances"] 
+                            if ti.assigned_worker_name == worker_name and ti.status == "completed"]
+            
+            avg_skill_match = 0
+            if relevant_tasks:
+                skill_matches = [calculate_skill_match(worker_data.skills, ti.skill_requirements) 
+                               for ti in relevant_tasks]
+                avg_skill_match = sum(skill_matches) / len(skill_matches)
+            
             worker_stats.append({
                 "Worker": worker_name,
                 "Tasks Completed": completed_tasks,
+                "Working Time (min)": total_working_time,
+                "Avg Skill Match": f"{avg_skill_match:.2f}",
                 "Status": "Available" if worker_data.is_available else "Busy"
             })
         
         worker_stats_df = pd.DataFrame(worker_stats)
-        st.dataframe(worker_stats_df, use_container_width=True)
+        st.dataframe(worker_stats_df, use_container_width=True, hide_index=True)
+        
+        # Worker skill utilization chart
+        if worker_stats:
+            chart_data = pd.DataFrame([
+                {"Worker": ws["Worker"], "Skill Match": float(ws["Avg Skill Match"])} 
+                for ws in worker_stats if float(ws["Avg Skill Match"]) > 0
+            ])
+            
+            if not chart_data.empty:
+                st.subheader("Worker Skill Utilization")
+                skill_chart = alt.Chart(chart_data).mark_bar().encode(
+                    x=alt.X('Worker:N', sort='-y'),
+                    y=alt.Y('Skill Match:Q', scale=alt.Scale(domain=[0, 2])),
+                    color=alt.condition(
+                        alt.datum['Skill Match'] > 1.0,
+                        alt.value('steelblue'),
+                        alt.value('orange')
+                    ),
+                    tooltip=['Worker:N', 'Skill Match:Q']
+                ).properties(
+                    width=600,
+                    height=300,
+                    title="Average Skill Match Score by Worker"
+                )
+                st.altair_chart(skill_chart, use_container_width=True)
     
     with tab3:
         st.subheader("Simulation Log")
-        
         if result["simulation_log"]:
             log_df = pd.DataFrame(result["simulation_log"])
-            st.dataframe(log_df, use_container_width=True)
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No simulation log availableTidak ada log simulasi.")
+            st.info("No simulation events recorded.")
+
+def get_table_download_link(df, filename, text):
+    """Generate a link to download the dataframe as a CSV file"""
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" style="color:blue;">{text}</a>'
+    return href
+
+# --- Fungsi Antarmuka CRUD (Streamlit UI) ---
+def render_workers_crud(workers_df_current):
+    """Merender antarmuka CRUD untuk pekerja"""
+    st.markdown('<div class="crud-section">', unsafe_allow_html=True)
+    st.subheader("👥 Manajemen Pekerja")
+
+    # Tampilkan pekerja saat ini
+    st.write("**Pekerja Saat Ini:**")
+    if not workers_df_current.empty:
+        st.dataframe(workers_df_current, use_container_width=True, hide_index=True)
+    else:
+        st.info("Tidak ada pekerja ditemukan. Tambahkan pekerja di bawah.")
+
+    # Operasi CRUD
+    operation = st.selectbox("Pilih Operasi:", ["Tambah Pekerja", "Perbarui Pekerja", "Hapus Pekerja"])
+
+    if operation == "Tambah Pekerja":
+        with st.form("add_worker_form"):
+            st.write("**Tambah Pekerja Baru**")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                worker_name = st.text_input("Nama Pekerja*")
+                bending = st.slider("Kemampuan Bending", 0, 100, 50)
+                gluing = st.slider("Kemampuan Gluing", 0, 100, 50)
+                assembling = st.slider("Kemampuan Assembling", 0, 100, 50)
+
+            with col2:
+                edge_scrap = st.slider("Kemampuan EdgeScrap", 0, 100, 50)
+                open_paper = st.slider("Kemampuan OpenPaper", 0, 100, 50)
+                quality_control = st.slider("Kemampuan QualityControl", 0, 100, 50)
+
+            st.write("**Produk Favorit (opsional):**")
+            col3, col4, col5 = st.columns(3)
+            with col3:
+                fav1 = st.text_input("Produk Favorit 1")
+            with col4:
+                fav2 = st.text_input("Produk Favorit 2")
+            with col5:
+                fav3 = st.text_input("Produk Favorit 3")
+
+            submitted = st.form_submit_button("Tambah Pekerja")
+
+            if submitted:
+                if worker_name.strip():
+                    worker_data = {
+                        "Worker": worker_name.strip(),
+                        "Bending": bending,
+                        "Gluing": gluing,
+                        "Assembling": assembling,
+                        "EdgeScrap": edge_scrap,
+                        "OpenPaper": open_paper,
+                        "QualityControl": quality_control,
+                        "FavoriteProduct1": fav1.strip() if fav1.strip() else "",
+                        "FavoriteProduct2": fav2.strip() if fav2.strip() else "",
+                        "FavoriteProduct3": fav3.strip() if fav3.strip() else ""
+                    }
+
+                    success, message = add_worker(workers_df_current, worker_data)
+                    if success:
+                        st.markdown(f'<div class="success-box">{message}</div>', unsafe_allow_html=True)
+                        st.rerun() # Memuat ulang aplikasi untuk melihat perubahan
+                    else:
+                        st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="error-box">Nama pekerja wajib diisi!</div>', unsafe_allow_html=True)
+
+    elif operation == "Perbarui Pekerja":
+        if not workers_df_current.empty:
+            selected_worker = st.selectbox("Pilih Pekerja untuk Diperbarui:", workers_df_current["Worker"].tolist())
+
+            if selected_worker:
+                # Dapatkan data pekerja saat ini
+                current_data = workers_df_current[workers_df_current["Worker"] == selected_worker].iloc[0]
+
+                with st.form("update_worker_form"):
+                    st.write(f"**Perbarui Pekerja: {selected_worker}**")
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        new_name = st.text_input("Nama Pekerja*", value=current_data["Worker"])
+                        bending = st.slider("Kemampuan Bending", 0, 100, int(current_data["Bending"]))
+                        gluing = st.slider("Kemampuan Gluing", 0, 100, int(current_data["Gluing"]))
+                        assembling = st.slider("Kemampuan Assembling", 0, 100, int(current_data["Assembling"]))
+
+                    with col2:
+                        edge_scrap = st.slider("Kemampuan EdgeScrap", 0, 100, int(current_data["EdgeScrap"]))
+                        open_paper = st.slider("Kemampuan OpenPaper", 0, 100, int(current_data["OpenPaper"]))
+                        quality_control = st.slider("Kemampuan QualityControl", 0, 100, int(current_data["QualityControl"]))
+
+                    st.write("**Produk Favorit:**")
+                    col3, col4, col5 = st.columns(3)
+                    with col3:
+                        fav1 = st.text_input("Produk Favorit 1", value=str(current_data["FavoriteProduct1"]) if pd.notna(current_data["FavoriteProduct1"]) else "")
+                    with col4:
+                        fav2 = st.text_input("Produk Favorit 2", value=str(current_data["FavoriteProduct2"]) if pd.notna(current_data["FavoriteProduct2"]) else "")
+                    with col5:
+                        fav3 = st.text_input("Produk Favorit 3", value=str(current_data["FavoriteProduct3"]) if pd.notna(current_data["FavoriteProduct3"]) else "")
+
+                    submitted = st.form_submit_button("Perbarui Pekerja")
+
+                    if submitted:
+                        if new_name.strip():
+                            worker_data = {
+                                "Worker": new_name.strip(),
+                                "Bending": bending,
+                                "Gluing": gluing,
+                                "Assembling": assembling,
+                                "EdgeScrap": edge_scrap,
+                                "OpenPaper": open_paper,
+                                "QualityControl": quality_control,
+                                "FavoriteProduct1": fav1.strip() if fav1.strip() else "",
+                                "FavoriteProduct2": fav2.strip() if fav2.strip() else "",
+                                "FavoriteProduct3": fav3.strip() if fav3.strip() else ""
+                            }
+
+                            success, message = update_worker(workers_df_current, selected_worker, worker_data)
+                            if success:
+                                st.markdown(f'<div class="success-box">{message}</div>', unsafe_allow_html=True)
+                                st.rerun() # Memuat ulang aplikasi untuk melihat perubahan
+                            else:
+                                st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="error-box">Nama pekerja wajib diisi!</div>', unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada pekerja yang tersedia untuk diperbarui.")
+
+    elif operation == "Hapus Pekerja":
+        if not workers_df_current.empty:
+            selected_worker = st.selectbox("Pilih Pekerja untuk Dihapus:", workers_df_current["Worker"].tolist())
+
+            if selected_worker:
+                st.warning(f"Apakah Anda yakin ingin menghapus pekerja: **{selected_worker}**?")
+
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    if st.button("🗑️ Hapus", type="secondary"):
+                        success, message = delete_worker(workers_df_current, selected_worker)
+                        if success:
+                            st.markdown(f'<div class="success-box">{message}</div>', unsafe_allow_html=True)
+                            st.rerun() # Memuat ulang aplikasi untuk melihat perubahan
+                        else:
+                            st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada pekerja yang tersedia untuk dihapus.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def render_products_crud(products_df_current):
+    """Merender antarmuka CRUD untuk produk"""
+    st.markdown('<div class="crud-section">', unsafe_allow_html=True)
+    st.subheader("📦 Manajemen Tugas Produk")
+
+    # Tampilkan produk saat ini
+    st.write("**Tugas Produk Saat Ini:**")
+    if not products_df_current.empty:
+        st.dataframe(products_df_current, use_container_width=True, hide_index=True)
+    else:
+        st.info("Tidak ada tugas produk ditemukan. Tambahkan tugas produk di bawah.")
+
+    # Operasi CRUD
+    operation = st.selectbox("Pilih Operasi:", ["Tambah Tugas Produk", "Perbarui Tugas Produk", "Hapus Tugas Produk"], key="product_operation")
+
+    if operation == "Tambah Tugas Produk":
+        with st.form("add_product_form"):
+            st.write("**Tambah Tugas Produk Baru**")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                product = st.text_input("Nama Produk*")
+                task = st.text_input("Deskripsi Tugas*")
+                result_id = st.text_input("ID Hasil*")
+                requirements = st.text_input("Persyaratan (dipisahkan koma)")
+                duration_slot = st.number_input("Durasi Slot", min_value=1, value=1)
+
+            with col2:
+                st.write("**Persyaratan Kemampuan (0-100):**")
+                bending = st.slider("Bending", 0, 100, 0, key="add_bending")
+                gluing = st.slider("Gluing", 0, 100, 0, key="add_gluing")
+                assembling = st.slider("Assembling", 0, 100, 0, key="add_assembling")
+                edge_scrap = st.slider("EdgeScrap", 0, 100, 0, key="add_edge")
+                open_paper = st.slider("OpenPaper", 0, 100, 0, key="add_paper")
+                quality_control = st.slider("QualityControl", 0, 100, 0, key="add_qc")
+
+            submitted = st.form_submit_button("Tambah Tugas Produk")
+
+            if submitted:
+                if product.strip() and task.strip() and result_id.strip():
+                    product_data = {
+                        "Product": product.strip(),
+                        "Task": task.strip(),
+                        "Result": result_id.strip(),
+                        "Requirements": requirements.strip() if requirements.strip() else "",
+                        "Bending": bending,
+                        "Gluing": gluing,
+                        "Assembling": assembling,
+                        "EdgeScrap": edge_scrap,
+                        "OpenPaper": open_paper,
+                        "QualityControl": quality_control,
+                        "DurationSlot": duration_slot
+                    }
+
+                    success, message = add_product(products_df_current, product_data)
+                    if success:
+                        st.markdown(f'<div class="success-box">{message}</div>', unsafe_allow_html=True)
+                        st.rerun() # Memuat ulang aplikasi untuk melihat perubahan
+                    else:
+                        st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="error-box">Nama produk, deskripsi tugas, dan ID hasil wajib diisi!</div>', unsafe_allow_html=True)
+
+    elif operation == "Perbarui Tugas Produk":
+        if not products_df_current.empty:
+            selected_product = st.selectbox("Pilih Tugas Produk untuk Diperbarui:", products_df_current["Result"].tolist(), key="update_product_select")
+
+            if selected_product:
+                # Dapatkan data produk saat ini
+                current_data = products_df_current[products_df_current["Result"] == selected_product].iloc[0]
+
+                with st.form("update_product_form"):
+                    st.write(f"**Perbarui Tugas Produk: {selected_product}**")
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        product = st.text_input("Nama Produk*", value=current_data["Product"])
+                        task = st.text_input("Deskripsi Tugas*", value=current_data["Task"])
+                        result_id = st.text_input("ID Hasil*", value=current_data["Result"])
+                        requirements = st.text_input("Persyaratan (dipisahkan koma)",
+                                                   value=str(current_data["Requirements"]) if pd.notna(current_data["Requirements"]) else "")
+                        duration_slot = st.number_input("Durasi Slot", min_value=1, value=int(current_data["DurationSlot"]))
+
+                    with col2:
+                        st.write("**Persyaratan Kemampuan (0-100):**")
+                        bending = st.slider("Bending", 0, 100, int(current_data["Bending"]), key="upd_bending")
+                        gluing = st.slider("Gluing", 0, 100, int(current_data["Gluing"]), key="upd_gluing")
+                        assembling = st.slider("Assembling", 0, 100, int(current_data["Assembling"]), key="upd_assembling")
+                        edge_scrap = st.slider("EdgeScrap", 0, 100, int(current_data["EdgeScrap"]), key="upd_edge")
+                        open_paper = st.slider("OpenPaper", 0, 100, int(current_data["OpenPaper"]), key="upd_paper")
+                        quality_control = st.slider("QualityControl", 0, 100, int(current_data["QualityControl"]), key="upd_qc")
+
+                    submitted = st.form_submit_button("Perbarui Tugas Produk")
+
+                    if submitted:
+                        if product.strip() and task.strip() and result_id.strip():
+                            product_data = {
+                                "Product": product.strip(),
+                                "Task": task.strip(),
+                                "Result": result_id.strip(),
+                                "Requirements": requirements.strip() if requirements.strip() else "",
+                                "Bending": bending,
+                                "Gluing": gluing,
+                                "Assembling": assembling,
+                                "EdgeScrap": edge_scrap,
+                                "OpenPaper": open_paper,
+                                "QualityControl": quality_control,
+                                "DurationSlot": duration_slot
+                            }
+
+                            success, message = update_product(products_df_current, selected_product, product_data)
+                            if success:
+                                st.markdown(f'<div class="success-box">{message}</div>', unsafe_allow_html=True)
+                                st.rerun() # Memuat ulang aplikasi untuk melihat perubahan
+                            else:
+                                st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="error-box">Nama produk, deskripsi tugas, dan ID hasil wajib diisi!</div>', unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada tugas produk yang tersedia untuk diperbarui.")
+
+    elif operation == "Hapus Tugas Produk":
+        if not products_df_current.empty:
+            selected_product = st.selectbox("Pilih Tugas Produk untuk Dihapus:", products_df_current["Result"].tolist(), key="delete_product_select")
+
+            if selected_product:
+                st.warning(f"Apakah Anda yakin ingin menghapus tugas produk: **{selected_product}**?")
+
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    if st.button("🗑️ Hapus", type="secondary", key="delete_product_btn"):
+                        success, message = delete_product(products_df_current, selected_product)
+                        if success:
+                            st.markdown(f'<div class="success-box">{message}</div>', unsafe_allow_html=True)
+                            st.rerun() # Memuat ulang aplikasi untuk melihat perubahan
+                        else:
+                            st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada tugas produk yang tersedia untuk dihapus.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
 
 # --- Main Application ---
 def main():
@@ -576,7 +1117,8 @@ def main():
     # Sidebar navigation
     with st.sidebar:
         st.header("Navigation")
-        page = st.radio("Go to", ["Home", "Product Database", "Worker Database", "Production Order", "About"])
+        # Menambahkan opsi navigasi untuk CRUD
+        page = st.radio("Go to", ["Home", "Product Database", "Worker Database", "Production Order", "Manage Workers", "Manage Products", "About"])
     
     if page == "Home":
         st.header("Welcome to Worker Task Autoassign System")
@@ -606,14 +1148,47 @@ def main():
         st.write("🎯 **Production Order**: Create and manage production orders")
         st.write("📈 **Real-Time Analysis**: View assignment results and performance statistics")
         st.write("🔄 **Dynamic Assignment**: Employees can switch tasks optimally")
+        st.write("👥 **Manage Workers**: Add, update, or delete worker profiles (new!)")
+        st.write("📦 **Manage Products**: Add, update, or delete product tasks (new!)")
     
     elif page == "Product Database":
         st.header("📦 Product Database")
         st.dataframe(products_df, use_container_width=True)
+        # Add flow diagram and attribute distribution if desired (from previous versions)
+        # For simplicity, keeping it basic as per the provided app.py's Product Database section
+
+        # As per the provided `app.py`, this section was simplified,
+        # but if you need the detailed charts back, let me know.
+        # For now, just showing the dataframe.
+
+        # Example of how to add the detailed charts back:
+        # # Group products and show their tasks
+        # for product in products_df['Product'].unique():
+        #     with st.expander(f"**{product}**"):
+        #         product_tasks = products_df[products_df['Product'] == product]
+        #         st.dataframe(product_tasks)
+        #         # ... (add Altair chart logic for tasks and dependencies here) ...
+        
+        # # Show skill attribute distribution
+        # st.markdown('<div class="sub-header">Distribusi Atribut Tugas</div>', unsafe_allow_html=True)
+        # # ... (add Altair chart logic for attribute distribution here) ...
     
     elif page == "Worker Database":
         st.header("👥 Worker Database")
         st.dataframe(workers_df, use_container_width=True)
+        # Add worker skill charts and preferences if desired (from previous versions)
+        # For simplicity, keeping it basic as per the provided app.py's Worker Database section
+
+        # Example of how to add the detailed charts back:
+        # for _, worker in workers_df.iterrows():
+        #     with st.expander(f"**{worker['Worker']}**"):
+        #         col1, col2 = st.columns([3, 2])
+        #         with col1:
+        #             # Display worker skills chart
+        #             # ... (add Altair chart logic for worker skills here) ...
+        #         with col2:
+        #             # Display worker preferences
+        #             # ... (add worker preferences display here) ...
     
     elif page == "Production Order":
         st.header("🎯 Production Order")
@@ -627,9 +1202,11 @@ def main():
             st.write("**Choose Product and Quantity:**")
             
             products_to_produce = {}
-            unique_products = products_df["Product"].unique()
+            # Re-load unique_products here to ensure it's up-to-date with any CRUD changes
+            current_products_df = load_data()[1] 
+            unique_products_for_order = current_products_df["Product"].unique()
             
-            for product in unique_products:
+            for product in unique_products_for_order:
                 quantity = st.number_input(
                     product, 
                     min_value=0, 
@@ -643,10 +1220,12 @@ def main():
         
         with col2:
             st.write("**Choose Worker(s):**")
+            # Re-load workers_df here to ensure it's up-to-date with any CRUD changes
+            current_workers_df = load_data()[0]
             selected_workers = st.multiselect(
                 "Choose Worker(s)",
-                workers_df["Worker"].tolist(),
-                default=workers_df["Worker"].tolist()
+                current_workers_df["Worker"].tolist(),
+                default=current_workers_df["Worker"].tolist()
             )
         
         # Order summary
@@ -664,18 +1243,28 @@ def main():
                     st.error("Select at least one worker!")
                 else:
                     with st.spinner("Running Simulation..."):
-                        available_workers_df = workers_df[workers_df["Worker"].isin(selected_workers)]
+                        available_workers_df = current_workers_df[current_workers_df["Worker"].isin(selected_workers)]
                         
                         result = assign_tasks(
                             products_to_produce=products_to_produce,
                             available_workers_df=available_workers_df,
-                            products_df=products_df,
+                            products_df=current_products_df, # Pastikan menggunakan products_df terbaru
                             slot_duration_minutes=30
                         )
                         
                         if result:
                             display_simulation_results(result)
+        
+    elif page == "Manage Workers":
+        # Muat ulang data untuk mendapatkan perubahan terbaru
+        workers_df_latest, _ = load_data()
+        render_workers_crud(workers_df_latest)
     
+    elif page == "Manage Products":
+        # Muat ulang data untuk mendapatkan perubahan terbaru
+        _, products_df_latest = load_data()
+        render_products_crud(products_df_latest)
+
     elif page == "About":
         st.header("About the System")
         
@@ -686,6 +1275,7 @@ def main():
         st.write("• Dependency management between tasks")
         st.write("• Real-time simulation")
         st.write("• Worker performance analysis")
+        st.write("• CRUD for Workers and Products") # Tambahkan fitur baru
         
         st.subheader("Technology:")
         st.write("• Python & Streamlit")
@@ -694,4 +1284,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
