@@ -6,828 +6,692 @@ from collections import defaultdict
 import time
 import io
 import base64
+import math
 
 # Set page configuration
 st.set_page_config(
     page_title="Task Auto-Assignment System",
     page_icon="📋",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Cache data loading to improve performance
-@st.cache_data
-def load_data():
-    workers_df = pd.read_csv("workers.csv")
-    products_df = pd.read_csv("products.csv")
-    return workers_df, products_df
-
-# Load data
-workers_df, products_df = load_data()
-
-# Create unique product list
-unique_products = products_df['Product'].unique()
-
-# Sidebar for navigation
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Home", "Product Database", "Worker Database", "Production Order", "About"])
-
-# Custom CSS styling
+# Custom CSS to fix layout issues
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 36px;
-        font-weight: bold;
-        color: #1E88E5;
-        margin-bottom: 20px;
+    .main .block-container {
+        padding-left: 2rem;
+        padding-right: 2rem;
+        max-width: none;
     }
-    .sub-header {
-        font-size: 24px;
-        font-weight: bold;
-        color: #424242;
-        margin-bottom: 10px;
-        margin-top: 20px;
+    
+    .sidebar .sidebar-content {
+        width: 21rem;
     }
-    .task-card {
-        background-color: #f0f2f6;
-        border-radius: 5px;
-        padding: 10px;
-        margin-bottom: 10px;
+    
+    /* Ensure main content doesn't get cut off */
+    .main {
+        margin-left: 0;
     }
-    .highlight {
-        background-color: #fff8e1;
-        border-left: 5px solid #FFB300;
-        padding: 5px;
+    
+    /* Fix for wide layout */
+    .stApp > div:first-child {
+        margin-left: 0;
+    }
+    
+    /* Specific fix for schedule tables */
+    .stDataFrame, .stTable {
+        width: 100% !important;
+        overflow-x: auto !important;
+    }
+    
+    /* Fix for tabs container */
+    .stTabs [data-baseweb="tab-list"] {
+        width: 100% !important;
+    }
+    
+    /* Ensure schedule content is not cut off */
+    .element-container {
+        width: 100% !important;
+    }
+    
+    /* Fix for dataframe display */
+    div[data-testid="stDataFrame"] {
+        width: 100% !important;
+        overflow-x: auto !important;
+    }
+    
+    /* Responsive adjustments */
+    @media (max-width: 768px) {
+        .main .block-container {
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+    }
+    
+    /* Force full width for schedule content */
+    .stDataFrame > div {
+        width: 100% !important;
+        max-width: none !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Helper functions
-def calculate_skill_match(worker_skills, task_attributes):
-    skill_score = 0
-    total_weight = 0
-    
-    for skill in ['Bending', 'Gluing', 'Assembling', 'EdgeScrap', 'OpenPaper', 'QualityControl']:
-        if task_attributes[skill] > 0:  # Only consider relevant skills for this task
-            weight = task_attributes[skill] / 100  # Convert percentage to decimal
-            skill_score += worker_skills[skill] * weight
-            total_weight += weight
-    
-    # Avoid division by zero
-    if total_weight == 0:
-        return 0
-        
-    return skill_score / total_weight
-
-def generate_time_slots(start_hour=8, end_hour=16):
-    """Generate 30-minute time slots between given hours"""
-    slots = []
-    for hour in range(start_hour, end_hour):
-        slots.append(f"{hour:02d}:00")
-        slots.append(f"{hour:02d}:30")
-    return slots
-
-def check_requirements_met(completed_tasks, requirements):
-    """Check if all requirement tasks are completed"""
-    if not requirements or pd.isna(requirements):
-        return True
-        
-    required_tasks = [req.strip() for req in str(requirements).split(',')]
-    return all(req in completed_tasks for req in required_tasks)
-
-def assign_tasks(products_to_produce, workers_df, products_df):
-    """Implements an aggressive task progression system where workers can immediately move to the next task
-    as soon as any requirement is met, leaving the rest of the previous task for other workers"""
-    time_slots = generate_time_slots(8, 16)
-    
-    # Calculate total production days needed
-    total_tasks = sum(
-        len(products_df[products_df['Product'] == product]) * quantity 
-        for product, quantity in products_to_produce.items())
-    estimated_days = max(1, int(np.ceil(total_tasks / (len(workers_df) * len(time_slots) * 0.8))))
-    
-    # Create multi-day schedule
-    schedule = {}
-    for day in range(1, estimated_days + 1):
-        schedule[day] = {worker: {slot: None for slot in time_slots} for worker in workers_df['Worker']}
-    
-    # Initialize tracking variables
-    completed_task_ids = set()
-    partial_completions = set()  # Track tasks that have been started
-    requirement_mappings = {}  # Map requirements to tasks that need them
-    task_progress = {}  # Track progress on each task type
-    worker_stats = {
-        worker: {
-            'current_task': None,
-            'current_product': None,
-            'task_history': [],
-            'completed_products': defaultdict(int),
-            'total_tasks_completed': 0,
-            'skill_utilization': 0,
-            'time_spent_on_product': defaultdict(int),
-            'progression_score': 0,  # Track how often the worker moves to new tasks
-            'aggressiveness': np.random.uniform(0.2, 0.8)  # Worker's eagerness to move to new tasks
-        } for worker in workers_df['Worker']
-    }
-    
-    # Create flattened list of all tasks across all products
-    all_tasks = []
-    for product, quantity in products_to_produce.items():
-        product_tasks = products_df[products_df['Product'] == product].copy()
-        for _, task in product_tasks.iterrows():
-            for _ in range(quantity):
-                all_tasks.append({
-                    'product': product,
-                    'task_name': task['Task'],
-                    'task_id': task['Result'],
-                    'requirements': task['Requirements'],
-                    'duration': task['DurationSlot'],
-                    'bending': task['Bending'],
-                    'gluing': task['Gluing'],
-                    'assembling': task['Assembling'],
-                    'edge_scrap': task['EdgeScrap'],
-                    'open_paper': task['OpenPaper'],
-                    'quality_control': task['QualityControl'],
-                    'assigned': False,
-                    'in_progress': False,
-                    'completed': False,
-                    'day_assigned': None,
-                    'slot_assigned': None,
-                    'progress_percentage': 0,  # Track partial completion
-                    'workers_involved': []  # Keep track of which workers contributed
-                })
-    
-    # Group tasks by their task name (not product)
-    task_groups = defaultdict(list)
-    for task in all_tasks:
-        task_groups[task['task_name']].append(task)
-        # Initialize task progress
-        task_progress[task['task_id']] = {
-            'required_for': [],       # Tasks that require this task
-            'any_progress': False,    # Whether any work has been done on this task
-            'started': False,         # Whether this task has been started
-            'min_progress_met': False # Whether this task has met minimum progress for next tasks
-        }
-    
-    # Build task dependency graph and requirement mappings
-    for task in all_tasks:
-        if not pd.isna(task['requirements']):
-            reqs = task['requirements'].split(',')
-            for req in reqs:
-                req = req.strip()
-                task_progress[req]['required_for'].append(task['task_id'])
-                
-                # Map requirements to the tasks that need them
-                if req not in requirement_mappings:
-                    requirement_mappings[req] = []
-                requirement_mappings[req].append(task['task_id'])
-    
-    # Determine processing order based on task dependencies
-    processing_order = []
-    visited = set()
-    
-    def topological_sort(task_name):
-        if task_name in visited:
-            return
-        visited.add(task_name)
-        
-        # Get requirements for this task type
-        sample_task = next(t for t in all_tasks if t['task_name'] == task_name)
-        if not pd.isna(sample_task['requirements']):
-            for req in sample_task['requirements'].split(','):
-                req = req.strip()
-                # Find the task name that produces this requirement
-                req_task_name = next(t['task_name'] for t in all_tasks if t['task_id'] == req)
-                topological_sort(req_task_name)
-        
-        processing_order.append(task_name)
-    
-    # Build the processing order
-    for task_name in task_groups:
-        topological_sort(task_name)
-    
-    # Track workers who should be prioritized for newer tasks vs. completing existing tasks
-    aggressive_workers = set()  # Workers who aggressively move to next tasks
-    
-    # Process each day
-    for day in range(1, estimated_days + 1):
-        # Dynamically determine which workers should be aggressive (move to new tasks quickly)
-        # Initially set 30-40% of workers to be aggressive
-        if day == 1:
-            aggressive_workers = set(np.random.choice(
-                workers_df['Worker'].tolist(), 
-                size=max(1, int(len(workers_df) * 0.3)),
-                replace=False
-            ))
+# --- Data Models for Simulation ---
+class TaskSimulationData:
+    def __init__(self, product_row):
+        self.product = product_row["Product"]
+        self.description = product_row["Task"]
+        self.task_id = product_row["Result"]
+        # Handle NaN requirements gracefully
+        requirements_str = str(product_row["Requirements"])
+        if pd.isna(product_row["Requirements"]) or requirements_str.lower() == "nan":
+            self.requirements = []
         else:
-            # Adjust based on performance in previous days
-            worker_progression = [(w, s['progression_score']) for w, s in worker_stats.items()]
-            worker_progression.sort(key=lambda x: x[1], reverse=True)
-            aggressive_workers = set([w for w, _ in worker_progression[:max(1, int(len(workers_df) * 0.3))]])
+            self.requirements = [req.strip() for req in requirements_str.split(",") if req.strip()]
         
-        # Process all available tasks, not just those in processing order
-        # This allows workers to jump to tasks as soon as any requirement is met
-        available_task_pool = []
+        self.skill_requirements = {
+            "Bending": product_row["Bending"] / 100, 
+            "Gluing": product_row["Gluing"] / 100,
+            "Assembling": product_row["Assembling"] / 100,
+            "EdgeScrap": product_row["EdgeScrap"] / 100,
+            "OpenPaper": product_row["OpenPaper"] / 100,
+            "QualityControl": product_row["QualityControl"] / 100,
+        }
+        self.duration_slot = product_row["DurationSlot"]
+
+    def __repr__(self):
+        return f"TaskSimData(ID={self.task_id}, Product={self.product}, Req={self.requirements})"
+
+class WorkerSimulationData:
+    def __init__(self, worker_row):
+        self.name = worker_row["Worker"]
+        self.skills = {
+            "Bending": worker_row["Bending"],
+            "Gluing": worker_row["Gluing"],
+            "Assembling": worker_row["Assembling"],
+            "EdgeScrap": worker_row["EdgeScrap"],
+            "OpenPaper": worker_row["OpenPaper"],
+            "QualityControl": worker_row["QualityControl"],
+        }
+        self.favorite_products = [worker_row["FavoriteProduct1"], worker_row["FavoriteProduct2"], worker_row["FavoriteProduct3"]]
         
-        # First, add tasks with no requirements
-        for task_name in processing_order:
-            for task in task_groups[task_name]:
-                if not task['assigned'] and (pd.isna(task['requirements']) or not task['requirements']):
-                    available_task_pool.append(task)
+        # Simulation state
+        self.is_available = True
+        self.current_task_instance = None
+        self.time_remaining_on_task = 0
+        self.expected_completion_time = 0
+        self.task_history = []
+        self.is_aggressive = False
+        self.aggressiveness_factor = np.random.uniform(0.2, 0.8)
+        self.progression_score = 0
+        self.completed_products_count = defaultdict(int)
+        self.total_tasks_completed_units = 0
+        self.skill_utilization_score = 0
+        self.time_spent_on_product = defaultdict(int)
+        self.current_product_focus = None
         
-        # Then add tasks where at least one requirement has been started/partially completed
-        for task in all_tasks:
-            if task['assigned'] or task in available_task_pool:
-                continue
-                
-            if not pd.isna(task['requirements']):
-                requirements = task['requirements'].split(',')
-                any_req_started = False
-                
-                for req in requirements:
-                    req = req.strip()
-                    if req in partial_completions or req in completed_task_ids:
-                        any_req_started = True
-                        break
-                
-                if any_req_started:
-                    available_task_pool.append(task)
+    def __repr__(self):
+        return f"WorkerSimData(Name={self.name}, Available={self.is_available})"
+
+class TaskInstance:
+    def __init__(self, task_sim_data, instance_idx):
+        self.task_sim_data = task_sim_data
+        self.instance_id = f"{task_sim_data.task_id}_U{instance_idx}"
+        self.product = task_sim_data.product
+        self.task_id = task_sim_data.task_id
+        self.description = task_sim_data.description
+        self.requirements = task_sim_data.requirements
+        self.skill_requirements = task_sim_data.skill_requirements
+        self.duration_slot = task_sim_data.duration_slot
         
-        # Process each time slot in the day
-        for slot_idx, time_slot in enumerate(time_slots):
-            # Find available workers for this time slot
-            available_workers = [worker for worker in workers_df['Worker'] 
-                               if schedule[day][worker][time_slot] is None]
+        self.status = "pending"
+        self.progress_percentage = 0.0
+        self.assigned_worker_name = None
+        self.start_time_minutes = None
+        self.completion_time_minutes = None
+        self.assigned_history = []
+        
+    def __repr__(self):
+        return f"TaskInstance(ID={self.instance_id}, TaskType={self.task_id}, Status={self.status}, Progress={self.progress_percentage:.1f}%)"
+
+# --- Data Loading ---
+@st.cache_data
+def load_data():
+    """Load data from CSV files in the same directory"""
+    try:
+        workers_df = pd.read_csv("workers.csv")
+        products_df = pd.read_csv("products.csv")
+        return workers_df, products_df
+    except FileNotFoundError as e:
+        st.error(f"File not found: {e}")
+        st.error("Make sure 'workers.csv' dan 'products.csv' is in the same directory as this application.")
+        st.stop()
+
+# Helper functions
+def calculate_skill_match(worker_skills, task_skill_requirements):
+    """Calculate skill match score between worker and task"""
+    total_score = 0
+    num_relevant_skills = 0
+    
+    for skill_type, required_ratio in task_skill_requirements.items():
+        if required_ratio > 0:
+            worker_skill = worker_skills.get(skill_type, 0)
+            score = worker_skill / max(0.01, required_ratio)
+            total_score += score
+            num_relevant_skills += 1
             
-            if not available_workers or not available_task_pool:
-                continue
+    return total_score / num_relevant_skills if num_relevant_skills > 0 else 0.1
+
+def format_time(minutes):
+    """Convert simulation minutes to HH:MM format"""
+    hours_from_start = minutes // 60
+    mins_past_hour = minutes % 60
+    display_hour = 8 + hours_from_start
+    return f"{int(display_hour):02d}:{int(mins_past_hour):02d}"
+
+def get_task_group(task_id):
+    """Returns a generic task group ID (e.g., 'ST1' and 'SL1' both map to 'T1')"""
+    if task_id.startswith("ST"):
+        return f"T{task_id[2:]}"
+    elif task_id.startswith("SL"):
+        return f"T{task_id[2:]}"
+    elif task_id.startswith("BH"):
+        return f"T{task_id[2:]}"
+    return task_id # Fallback for other task IDs
+
+def check_requirements_met(task_instance, inventory, partial_completions):
+    """Check if task requirements are met, considering interchangeable requirements"""
+    # ST1, SL1, BH1 tasks have no requirements - they can always start
+    if not task_instance.requirements:
+        return True
+    
+    for req_task_id in task_instance.requirements:
+        # Check if any task from the same group as req_task_id has completed units or significant progress
+        req_task_group = get_task_group(req_task_id)
+        
+        met_by_group = False
+        for inv_task_id, completed_units in inventory.items():
+            if get_task_group(inv_task_id) == req_task_group and completed_units >= 1:
+                met_by_group = True
+                break
+        
+        if not met_by_group:
+            for pc in partial_completions:
+                if get_task_group(pc["task_id"]) == req_task_group and pc["progress_percentage"] >= 50.0:
+                    met_by_group = True
+                    break
+        
+        if not met_by_group:
+            return False
+    return True
+
+def get_earliest_available_tasks(all_task_instances, inventory, partial_completions):
+    """Get earliest tasks that can be started (prioritizing tasks with no requirements)"""
+    earliest_tasks = []
+    for task_instance in all_task_instances:
+        if task_instance.status == "pending" and not task_instance.requirements:
+            earliest_tasks.append(task_instance)
+    return earliest_tasks
+
+def get_available_tasks(all_task_instances, inventory, partial_completions):
+    """Get all tasks that can be started based on requirements"""
+    available_tasks = []
+    for task_instance in all_task_instances:
+        if task_instance.status == "pending" and check_requirements_met(task_instance, inventory, partial_completions):
+            available_tasks.append(task_instance)
+    return available_tasks
+
+def prioritize_tasks_for_flow(all_available_tasks, earliest_tasks, all_task_instances, inventory, partial_completions):
+    """Prioritize tasks to optimize production flow and worker transitions"""
+    prioritized_tasks = []
+    
+    # 1. Prioritize tasks that are earliest (no requirements)
+    prioritized_tasks.extend(sorted(earliest_tasks, key=lambda t: t.task_id))
+    
+    # 2. Add other available tasks that can enable progression
+    other_tasks = [t for t in all_available_tasks if t not in earliest_tasks]
+    prioritized_tasks.extend(sorted(other_tasks, key=lambda t: (len(t.requirements), t.task_id)))
+    
+    return prioritized_tasks
+
+def assign_worker_to_task(worker, task, current_time_minutes, slot_duration_minutes):
+    """Assign a worker to a task"""
+    worker.is_available = False
+    worker.current_task_instance = task
+    worker.time_remaining_on_task = task.duration_slot * slot_duration_minutes
+    
+    task.status = "in_progress"
+    task.assigned_worker_name = worker.name
+    task.start_time_minutes = current_time_minutes
+
+# --- Core Scheduling Logic ---
+def assign_tasks(products_to_produce, available_workers_df, products_df, slot_duration_minutes=30):
+    """Enhanced task assignment with dynamic worker transitions and interchangeable requirements"""
+    try:
+        # Initialize simulation data structures
+        task_sim_data_map = {row["Result"]: TaskSimulationData(row) for _, row in products_df.iterrows()}
+        worker_sim_data_map = {row["Worker"]: WorkerSimulationData(row) for _, row in available_workers_df.iterrows()}
+        
+        # Generate unique TaskInstance objects
+        all_task_instances = []
+        instance_counter = defaultdict(int)
+        
+        for product_name, quantity in products_to_produce.items():
+            product_tasks = products_df[products_df["Product"] == product_name].sort_values(by="Result")
+            for unit_idx in range(quantity):
+                for _, task_row in product_tasks.iterrows():
+                    task_sim_data = task_sim_data_map[task_row["Result"]]
+                    instance_counter[task_sim_data.task_id] += 1
+                    task_instance = TaskInstance(task_sim_data, instance_counter[task_sim_data.task_id])
+                    all_task_instances.append(task_instance)
+        
+        # Filter tasks for selected products
+        all_task_instances = [ti for ti in all_task_instances if ti.product in products_to_produce]
+
+        # Calculate simulation parameters
+        total_task_slots = sum(ti.duration_slot for ti in all_task_instances)
+        total_worker_slots_per_day = len(available_workers_df) * (8 * 60 / slot_duration_minutes)
+        estimated_days = max(1, math.ceil(total_task_slots / total_worker_slots_per_day))
+        
+        # Simulation state
+        current_time_minutes = 0
+        max_simulation_time = estimated_days * 8 * 60  # 8 hours per day
+        inventory = defaultdict(int)
+        partial_completions = []
+        
+        # Schedule tracking
+        schedule = defaultdict(lambda: defaultdict(lambda: defaultdict(str)))
+        simulation_log = []
+        
+        # Main simulation loop
+        while current_time_minutes < max_simulation_time:
+            current_day = current_time_minutes // (8 * 60) + 1
+            current_slot = (current_time_minutes % (8 * 60)) // slot_duration_minutes
             
-            # Sort workers - aggressive workers first, then others
-            available_workers.sort(key=lambda w: w in aggressive_workers, reverse=True)
-            
-            # Process each worker
-            for worker_name in available_workers:
-                worker_data = workers_df[workers_df['Worker'] == worker_name].iloc[0]
-                
-                # Check if this worker is aggressive (jumps to next tasks quickly)
-                is_aggressive = worker_name in aggressive_workers
-                
-                # Find best task for this worker
-                best_task = None
-                best_score = -1
-                
-                for task in available_task_pool[:]:  # Use a copy to avoid modification issues
-                    # For aggressive workers: allow starting a task even if only one requirement has started
-                    # For others: require all requirements to be at least partially completed
+            # Update worker progress
+            for worker_name, worker_data in worker_sim_data_map.items():
+                if not worker_data.is_available and worker_data.current_task_instance:
+                    worker_data.time_remaining_on_task -= slot_duration_minutes
                     
-                    if not pd.isna(task['requirements']):
-                        requirements = task['requirements'].split(',')
+                    # Update task progress
+                    task_instance = worker_data.current_task_instance
+                    progress_increment = 100 / task_instance.duration_slot
+                    task_instance.progress_percentage = min(100, task_instance.progress_percentage + progress_increment)
+                    
+                    # Check if task is completed
+                    if worker_data.time_remaining_on_task <= 0:
+                        task_instance.status = "completed"
+                        task_instance.completion_time_minutes = current_time_minutes
+                        inventory[task_instance.task_id] += 1
                         
-                        if is_aggressive:
-                            # Aggressive workers only need ANY ONE requirement to be started
-                            any_req_met = False
-                            for req in requirements:
-                                req = req.strip()
-                                if req in partial_completions or req in completed_task_ids:
-                                    any_req_met = True
-                                    break
-                                    
-                            if not any_req_met:
-                                continue
-                        else:
-                            # Regular workers need ALL requirements to be met
-                            all_reqs_met = True
-                            for req in requirements:
-                                req = req.strip()
-                                if req not in completed_task_ids:
-                                    all_reqs_met = False
-                                    break
-                                    
-                            if not all_reqs_met:
-                                continue
-                    
-                    # Calculate skill match (60% weight)
-                    skill_score = calculate_skill_match(
-                        worker_data, 
-                        {
-                            'Bending': task['bending'],
-                            'Gluing': task['gluing'],
-                            'Assembling': task['assembling'],
-                            'EdgeScrap': task['edge_scrap'],
-                            'OpenPaper': task['open_paper'],
-                            'QualityControl': task['quality_control']
-                        }
-                    )
-                    
-                    # Continuity bonus (10% weight)
-                    continuity_score = 0
-                    if worker_stats[worker_name]['current_product'] == task['product']:
-                        continuity_score = 0.1
-                    
-                    # Product preference (5% weight)
-                    product_pref = 0
-                    if task['product'] == worker_data['FavoriteProduct1']:
-                        product_pref = 0.05
-                    elif task['product'] == worker_data['FavoriteProduct2']:
-                        product_pref = 0.03
-                    elif task['product'] == worker_data['FavoriteProduct3']:
-                        product_pref = 0.02
-                    
-                    # Worker's specific aggressiveness value (0-25% weight)
-                    progression_bonus = 0
-                    if is_aggressive:
-                        # Higher for tasks that are needed by multiple other tasks (key dependencies)
-                        if task['task_id'] in task_progress and len(task_progress[task['task_id']]['required_for']) > 0:
-                            progression_bonus = 0.25 * worker_stats[worker_name]['aggressiveness'] * len(task_progress[task['task_id']]['required_for'])
-                    
-                    # Final score
-                    final_score = skill_score * 0.6 + continuity_score + product_pref + progression_bonus
-                    
-                    if final_score > best_score:
-                        best_score = final_score
-                        best_task = task
-                
-                # Assign the best task if found
-                if best_task:
-                    # Check if task fits in remaining slots
-                    remaining_slots = len(time_slots) - slot_idx
-                    
-                    # Calculate how much of the task to complete based on worker type
-                    task_duration = best_task['duration']
-                    original_duration = task_duration
-                    
-                    if is_aggressive:
-                        # Aggressive workers do minimal work to enable next tasks
-                        # They only do 20-40% of a task before moving on
-                        completion_target = worker_stats[worker_name]['aggressiveness'] * 0.4
-                        task_duration = max(1, min(int(task_duration * completion_target), remaining_slots))
-                    else:
-                        # Regular workers try to complete the full task
-                        task_duration = min(task_duration, remaining_slots)
-                    
-                    # Assign task for its duration
-                    for i in range(task_duration):
-                        if slot_idx + i < len(time_slots):
-                            current_slot = time_slots[slot_idx + i]
-                            schedule[day][worker_name][current_slot] = {
-                                'product': best_task['product'],
-                                'task': best_task['task_name'],
-                                'task_id': best_task['task_id']
-                            }
-                    
-                    # Update progress metrics
-                    progress_percentage = (task_duration / original_duration) * 100
-                    best_task['progress_percentage'] += progress_percentage
-                    best_task['workers_involved'].append(worker_name)
-                    
-                    # Mark this task as having some progress
-                    partial_completions.add(best_task['task_id'])
-                    task_progress[best_task['task_id']]['any_progress'] = True
-                    task_progress[best_task['task_id']]['started'] = True
-                    
-                    # Even minimal progress (20%+) on a task enables dependent tasks for aggressive workers
-                    if progress_percentage >= 20 and best_task['task_id'] in requirement_mappings:
-                        # Increase progression score for enabling new tasks
-                        if is_aggressive:
-                            worker_stats[worker_name]['progression_score'] += len(requirement_mappings[best_task['task_id']])
-                    
-                    # Mark task as fully completed if 100% done
-                    if best_task['progress_percentage'] >= 100:
-                        best_task['assigned'] = True
-                        best_task['completed'] = True
-                        completed_task_ids.add(best_task['task_id'])
-                        if best_task in available_task_pool:
-                            available_task_pool.remove(best_task)
-                    else:
-                        best_task['in_progress'] = True
-                    
-                    # Update worker tracking
-                    best_task['day_assigned'] = day
-                    best_task['slot_assigned'] = slot_idx
-                    worker_stats[worker_name]['task_history'].append({
-                        'task_id': best_task['task_id'],
-                        'product': best_task['product'],
-                        'task_name': best_task['task_name'],
-                        'progress': progress_percentage
-                    })
-                    worker_stats[worker_name]['completed_products'][best_task['product']] += progress_percentage / 100
-                    worker_stats[worker_name]['total_tasks_completed'] += progress_percentage / 100
-                    worker_stats[worker_name]['current_task'] = best_task['task_name']
-                    worker_stats[worker_name]['current_product'] = best_task['product']
-                    worker_stats[worker_name]['time_spent_on_product'][best_task['product']] += task_duration
-                    
-                    # Update skill utilization
-                    skill_match = calculate_skill_match(
-                        worker_data,
-                        {
-                            'Bending': best_task['bending'],
-                            'Gluing': best_task['gluing'],
-                            'Assembling': best_task['assembling'],
-                            'EdgeScrap': best_task['edge_scrap'],
-                            'OpenPaper': best_task['open_paper'],
-                            'QualityControl': best_task['quality_control']
-                        }
-                    )
-                    
-                    previous_total = worker_stats[worker_name]['total_tasks_completed'] - (progress_percentage / 100)
-                    if previous_total > 0:
-                        worker_stats[worker_name]['skill_utilization'] = (
-                            worker_stats[worker_name]['skill_utilization'] * previous_total + 
-                            skill_match * (progress_percentage / 100)
-                        ) / worker_stats[worker_name]['total_tasks_completed']
-                    else:
-                        worker_stats[worker_name]['skill_utilization'] = skill_match
-            
-            # After each time slot, refresh the available task pool
-            # This allows tasks to become available mid-day as requirements are met
-            for task in all_tasks:
-                if task['assigned'] or task in available_task_pool:
-                    continue
-                    
-                # Check if the task has no requirements or any requirement has been started
-                can_add = False
-                
-                if pd.isna(task['requirements']) or not task['requirements']:
-                    can_add = True
-                else:
-                    requirements = task['requirements'].split(',')
-                    for req in requirements:
-                        req = req.strip()
-                        if req in partial_completions or req in completed_task_ids:
-                            can_add = True
-                            break
-                
-                if can_add:
-                    available_task_pool.append(task)
-        
-    completion_stats = {
-        'percentage_completed': (sum(t['completed'] for t in all_tasks) / len(all_tasks) * 100) if all_tasks else 0,
-        'tasks_by_day': {
-            day: sum(1 for t in all_tasks if t['day_assigned'] == day) 
-            for day in range(1, estimated_days + 1)
-        },
-        'tasks_by_product': {
-            product: sum(1 for t in all_tasks if t['product'] == product and t['completed']) 
-            for product in products_to_produce.keys()    
-        },
-        'worker_tasks': {
-            worker: worker_stats[worker]['total_tasks_completed'] 
-            for worker in workers_df['Worker']
-        },
-        'estimated_days': estimated_days,
-        'progression_workers': list(aggressive_workers)
-    }
-    completion_stats['total_tasks'] = len(all_tasks)
-    completion_stats['completed_tasks'] = sum(1 for t in all_tasks if t['completed'])
-    completion_stats['completion_percentage'] = completion_stats['percentage_completed']
-
-    return schedule, completion_stats, worker_stats
-
-def get_table_download_link(df, filename, text):
-    """Generate a link to download the dataframe as a CSV file"""
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" style="color:blue;">{text}</a>'
-    return href
-
-# Main app logic
-if page == "Home":
-    st.markdown('<div class="main-header">Task Auto-Assignment System</div>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("""
-        ### Welcome to the Task Auto-Assignment System
-        
-        This system helps optimize production scheduling by:
-        
-        1. Prioritizing tasks based on dependencies
-        2. Matching workers to tasks based on skills
-        3. Minimizing task switching for workers
-        4. Balancing workload across available workers
-        
-        Use the navigation panel on the left to explore different sections of the application.
-        """)
-    
-    with col2:
-        st.image("https://cdn.pixabay.com/photo/2018/03/10/12/00/teamwork-3213924_1280.jpg", width=300)
-    
-    st.markdown("""
-    ### How it works
-    
-    1. **Product Database**: View and manage products and their production tasks
-    2. **Worker Database**: Manage worker profiles and their skill attributes
-    3. **Production Order**: Create production orders and generate optimized schedules
-    
-    Get started by navigating to the **Production Order** page to create your first optimized schedule.
-    """)
-
-elif page == "Product Database":
-    st.markdown('<div class="main-header">Product Database</div>', unsafe_allow_html=True)
-    
-    # Display product list
-    st.markdown('<div class="sub-header">Products</div>', unsafe_allow_html=True)
-    
-    # Group products and show their tasks
-    for product in unique_products:
-        with st.expander(f"**{product}**"):
-            product_tasks = products_df[products_df['Product'] == product]
-            st.dataframe(product_tasks)
-            
-            # Create a flow diagram of tasks
-            task_graph = alt.Chart(product_tasks).mark_circle(size=200).encode(
-                x=alt.X('Task:N', sort=None, title='Task Sequence'),
-                y=alt.Y('Product:N', title=None),
-                color=alt.Color('Result:N', legend=None),
-                tooltip=['Task', 'Result', 'Requirements']
-            ).properties(
-                width=600,
-                height=100
-            )
-            
-            # Add connecting lines based on requirements
-            edges = []
-            for _, task in product_tasks.iterrows():
-                if not pd.isna(task['Requirements']):
-                    requirements = task['Requirements'].split(', ')
-                    for req in requirements:
-                        edges.append({
-                            'source': req,
-                            'target': task['Result']
+                        worker_data.is_available = True
+                        worker_data.current_task_instance = None
+                        worker_data.time_remaining_on_task = 0
+                        
+                        simulation_log.append({
+                            "time": format_time(current_time_minutes),
+                            "event": f"Worker {worker_name} completed {task_instance.instance_id}"
                         })
             
-            if edges:
-                edges_df = pd.DataFrame(edges)
-                lines = alt.Chart(edges_df).mark_line(color='gray').encode(
-                    x='source:N',
-                    x2='target:N',
-                    y='source:N',
-                    y2='target:N'
-                )
-                st.altair_chart(task_graph + lines)
-            else:
-                st.altair_chart(task_graph)
+            # Get available workers and tasks
+            available_workers = [w for w in worker_sim_data_map.values() if w.is_available]
             
-    # Show skill attribute distribution
-    st.markdown('<div class="sub-header">Task Attribute Distribution</div>', unsafe_allow_html=True)
-    
-    # Create attribute comparison chart
-    chart_data = products_df.melt(
-        id_vars=['Product', 'Task', 'Result'], 
-        value_vars=['Bending', 'Gluing', 'Assembling', 'EdgeScrap', 'OpenPaper', 'QualityControl'],
-        var_name='Attribute', value_name='Score'
-    )
-    
-    attribute_chart = alt.Chart(chart_data).mark_bar().encode(
-        x=alt.X('Attribute:N', title='Task Attribute'),
-        y=alt.Y('mean(Score):Q', title='Average Score'),
-        color='Attribute:N',
-        column='Product:N'
-    ).properties(
-        width=100,
-        height=200
-    )
-    
-    st.altair_chart(attribute_chart)
-
-elif page == "Worker Database":
-    st.markdown('<div class="main-header">Worker Database</div>', unsafe_allow_html=True)
-    
-    # Display workers and their skills
-    st.markdown('<div class="sub-header">Workers</div>', unsafe_allow_html=True)
-    
-    workers_display = workers_df.copy()
-    
-    for _, worker in workers_df.iterrows():
-        with st.expander(f"**{worker['Worker']}**"):
-            col1, col2 = st.columns([3, 2])
+            # Get earliest tasks (no requirements) and all available tasks
+            earliest_tasks = get_earliest_available_tasks(all_task_instances, inventory, partial_completions)
+            all_available_tasks = get_available_tasks(all_task_instances, inventory, partial_completions)
             
-            with col1:
-                # Display worker skills
-                skills = ['Bending', 'Gluing', 'Assembling', 'EdgeScrap', 'OpenPaper', 'QualityControl']
-                skill_data = pd.DataFrame({
-                    'Skill': skills,
-                    'Score': [worker[skill] for skill in skills]
-                })
+            # Prioritize tasks for optimal flow
+            prioritized_tasks = prioritize_tasks_for_flow(all_available_tasks, earliest_tasks, all_task_instances, inventory, partial_completions)
+            
+            # Enhanced assignment logic with smart worker distribution
+            # Step 1: Identify task progression opportunities
+            task_progression_map = {}
+            for task in all_available_tasks:
+                task_level = len(task.requirements)
+                if task_level not in task_progression_map:
+                    task_progression_map[task_level] = []
+                task_progression_map[task_level].append(task)
+            
+            # Step 2: Smart worker assignment based on progression strategy
+            assigned_workers = set()
+            
+            # Priority 1: Ensure earliest tasks (level 0) have sufficient workers
+            level_0_tasks = task_progression_map.get(0, [])
+            if level_0_tasks:
+                workers_for_level_0 = max(1, len(available_workers) // 2)  # At least half workers on earliest tasks
+                for i, task in enumerate(level_0_tasks[:workers_for_level_0]):
+                    if i < len(available_workers):
+                        worker = available_workers[i]
+                        assign_worker_to_task(worker, task, current_time_minutes, slot_duration_minutes)
+                        assigned_workers.add(worker.name)
+                        
+                        simulation_log.append({
+                            "time": format_time(current_time_minutes),
+                            "event": f"Worker {worker.name} started {task.instance_id} (earliest task priority)"
+                        })
+            
+            # Priority 2: Assign remaining workers to highest available task level
+            remaining_workers = [w for w in available_workers if w.name not in assigned_workers]
+            
+            # Find highest task level that has available tasks
+            max_level = max(task_progression_map.keys()) if task_progression_map else 0
+            
+            for level in range(max_level, -1, -1):
+                if level in task_progression_map and remaining_workers:
+                    level_tasks = task_progression_map[level]
+                    
+                    # Assign workers to this level, but leave some for lower levels if needed
+                    if level > 0:
+                        # For higher levels, assign fewer workers to maintain balance
+                        workers_for_this_level = min(len(remaining_workers) // 2, len(level_tasks))
+                    else:
+                        # For level 0, assign all remaining workers
+                        workers_for_this_level = min(len(remaining_workers), len(level_tasks))
+                    
+                    for i in range(workers_for_this_level):
+                        if i < len(level_tasks) and i < len(remaining_workers):
+                            worker = remaining_workers[i]
+                            task = level_tasks[i]
+                            
+                            # Check skill match
+                            skill_score = calculate_skill_match(worker.skills, task.skill_requirements)
+                            favorite_bonus = 1.2 if task.product in worker.favorite_products else 1.0
+                            
+                            assign_worker_to_task(worker, task, current_time_minutes, slot_duration_minutes)
+                            assigned_workers.add(worker.name)
+                            
+                            simulation_log.append({
+                                "time": format_time(current_time_minutes),
+                                "event": f"Worker {worker.name} started {task.instance_id} (level {level}, skill: {skill_score:.2f})"
+                            })
+                    
+                    # Remove assigned workers from remaining list
+                    remaining_workers = [w for w in remaining_workers if w.name not in assigned_workers]
+            
+            # Priority 3: Assign any remaining workers to best available tasks
+            remaining_tasks = [t for t in all_available_tasks if t.status == "pending"]
+            for worker in remaining_workers:
+                if not remaining_tasks:
+                    break
                 
-                chart = alt.Chart(skill_data).mark_bar().encode(
-                    x=alt.X('Score:Q', scale=alt.Scale(domain=[0, 1])),
-                    y=alt.Y('Skill:N', sort='-x'),
-                    color=alt.Color('Score:Q', scale=alt.Scale(scheme='blues'))
-                ).properties(
-                    width=400,
-                    height=200,
-                    title=f"{worker['Worker']} Skills"
-                )
+                # Find best task for this worker based on skill match
+                best_task = None
+                best_score = 0
                 
-                st.altair_chart(chart)
+                for task in remaining_tasks:
+                    skill_score = calculate_skill_match(worker.skills, task.skill_requirements)
+                    favorite_bonus = 1.2 if task.product in worker.favorite_products else 1.0
+                    total_score = skill_score * favorite_bonus
+                    
+                    if total_score > best_score:
+                        best_score = total_score
+                        best_task = task
+                
+                if best_task:
+                    assign_worker_to_task(worker, best_task, current_time_minutes, slot_duration_minutes)
+                    remaining_tasks.remove(best_task)
+                    
+                    simulation_log.append({
+                        "time": format_time(current_time_minutes),
+                        "event": f"Worker {worker.name} started {best_task.instance_id} (fallback assignment)"
+                    })
             
-            with col2:
-                # Display worker preferences
-                st.write("**Product Preferences:**")
-                st.write(f"1. {worker['FavoriteProduct1']}")
-                st.write(f"2. {worker['FavoriteProduct2']}")
-                st.write(f"3. {worker['FavoriteProduct3']}")
+            # Record schedule and inventory
+            inventory_str = ", ".join([f"{task_id} {count} pcs" for task_id, count in inventory.items() if count > 0])
+            if not inventory_str:
+                inventory_str = "None, just started"
+            
+            for worker_name, worker_data in worker_sim_data_map.items():
+                if not worker_data.is_available and worker_data.current_task_instance:
+                    task_desc = f"[{worker_data.current_task_instance.task_id}] {worker_data.current_task_instance.description}"
+                    schedule[current_day][worker_name][current_slot] = task_desc
+                else:
+                    schedule[current_day][worker_name][current_slot] = "idle"
+            
+            # Store inventory for this time slot
+            schedule[current_day]["Available semi-finished tasks"][current_slot] = inventory_str
+            
+            # Advance time
+            current_time_minutes += slot_duration_minutes
+            
+            # Check if all tasks are completed
+            if all(t.status == "completed" for t in all_task_instances):
+                break
+        
+        return {
+            "schedule": schedule,
+            "inventory": dict(inventory),
+            "simulation_log": simulation_log,
+            "estimated_days": estimated_days,
+            "all_task_instances": all_task_instances,
+            "worker_sim_data_map": worker_sim_data_map
+        }
+    
+    except Exception as e:
+        st.error(f"Error in simulation: {str(e)}")
+        return None
 
-elif page == "Production Order":
-    st.markdown('<div class="main-header">Production Order</div>', unsafe_allow_html=True)
+# --- Display Functions ---
+def display_schedule_gantt(schedule_data, estimated_days):
+    """Display schedule in simplified Gantt chart format with day tabs"""
+    st.subheader("Tasks Schedule")
     
-    st.markdown("""
-    ### Create a production order to generate an optimized schedule
+    # Create tabs for each day
+    if estimated_days > 0:
+        day_tabs = st.tabs([f"Day {day}" for day in range(1, estimated_days + 1)])
+        
+        for day_idx, day in enumerate(range(1, estimated_days + 1)):
+            with day_tabs[day_idx]:
+                if day in schedule_data:
+                    # Create schedule table
+                    day_schedule = schedule_data[day]
+                    
+                    # Get all time slots
+                    all_slots = set()
+                    for worker_schedule in day_schedule.values():
+                        if isinstance(worker_schedule, dict):
+                            all_slots.update(worker_schedule.keys())
+                    
+                    if all_slots:
+                        max_slot = max(all_slots)
+                        
+                        # Create DataFrame for display
+                        schedule_rows = []
+                        for slot in range(max_slot + 1):
+                            time_str = format_time(slot * 30)
+                            row = {"TIME": time_str}
+                            
+                            # Add worker columns only (no semi-finished column)
+                            for worker_name in sorted(day_schedule.keys()):
+                                if worker_name != "Available Semi-finished tasks" and isinstance(day_schedule[worker_name], dict):
+                                    task_desc = day_schedule[worker_name].get(slot, "idle")
+                                    row[f"Worker {worker_name}"] = task_desc
+                            
+                            schedule_rows.append(row)
+                        
+                        schedule_df = pd.DataFrame(schedule_rows)
+                        
+                        # Use container to ensure full width
+                        with st.container():
+                            st.dataframe(
+                                schedule_df, 
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                    else:
+                        st.info("No schedule for today.")
+                else:
+                    st.info("No schedule for today.")
+    else:
+        st.info("No schedule data.")
+
+def display_simulation_results(result):
+    """Display simulation results in tabs"""
+    if result is None:
+        st.error("Simulation failed to be executed!")
+        return
     
-    Select products and quantities to generate an optimized work schedule.
-    """)
+    st.success(f"Simulation successfull! Estimated time: {result['estimated_days']} days")
     
-    # Create form for production order
-    with st.form("production_order"):
-        # Product selection
-        st.markdown('<div class="sub-header">Select Products</div>', unsafe_allow_html=True)
-        
-        # Create columns for product selection
-        product_cols = st.columns(3)
-        product_quantities = {}
-        
-        for i, product in enumerate(unique_products):
-            col_idx = i % 3
-            with product_cols[col_idx]:
-                quantity = st.number_input(f"{product}", min_value=0, value=0, step=1)
-                if quantity > 0:
-                    product_quantities[product] = quantity
-        
-        # Worker selection
-        st.markdown('<div class="sub-header">Available Workers</div>', unsafe_allow_html=True)
-        worker_availability = st.multiselect("Select available workers", 
-                                           options=workers_df['Worker'].tolist(),
-                                           default=workers_df['Worker'].tolist())
-        
-        # Submit button
-        submitted = st.form_submit_button("Generate Schedule")
+    # Create tabs without Summary
+    tab1, tab2, tab3 = st.tabs(["📅 Schedule", "👥 Worker Stats", "📝 Simulation Log"])
     
-    # Process form submission
-    if submitted:
-        if not product_quantities:
-            st.warning("Please select at least one product with a quantity greater than 0.")
-            st.stop()
+    with tab1:
+        display_schedule_gantt(result["schedule"], result["estimated_days"])
+    
+    with tab2:
+        st.subheader("Worker Statistics")
         
-        if not worker_availability:
-            st.warning("Please select at least one available worker.")
-            st.stop()
+        worker_stats = []
+        for worker_name, worker_data in result["worker_sim_data_map"].items():
+            completed_tasks = len([t for t in result["all_task_instances"] if t.assigned_worker_name == worker_name and t.status == "completed"])
+            worker_stats.append({
+                "Worker": worker_name,
+                "Tasks Completed": completed_tasks,
+                "Status": "Available" if worker_data.is_available else "Busy"
+            })
         
-        # Filter workers based on availability
-        available_workers_df = workers_df[workers_df['Worker'].isin(worker_availability)]
+        worker_stats_df = pd.DataFrame(worker_stats)
+        st.dataframe(worker_stats_df, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Simulation Log")
         
-        # Display loading spinner
-        with st.spinner("Generating optimized schedule..."):
-            # Simulate processing time (could be removed in production)
-            progress_bar = st.progress(0)
-            for i in range(100):
-                time.sleep(0.01)
-                progress_bar.progress(i + 1)
-            
-            # Generate schedule
-            schedule, completion_stats, worker_stats = assign_tasks(
-                product_quantities, available_workers_df, products_df
-            )
+        if result["simulation_log"]:
+            log_df = pd.DataFrame(result["simulation_log"])
+            st.dataframe(log_df, use_container_width=True)
+        else:
+            st.info("No simulation log availableTidak ada log simulasi.")
+
+# --- Main Application ---
+def main():
+    # Load data
+    try:
+        workers_df, products_df = load_data()
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+        return
+    
+    # Sidebar navigation
+    with st.sidebar:
+        st.header("Navigation")
+        page = st.radio("Go to", ["Home", "Product Database", "Worker Database", "Production Order", "About"])
+    
+    if page == "Home":
+        st.header("Welcome to Worker Task Autoassign System")
         
-        # Display results
-        st.success(f"Schedule generated! Task completion: {completion_stats['percentage_completed']:.1f}%")
-        st.info(f"Estimated production days needed: {completion_stats['estimated_days']}")
+        st.write("This system helps you organize employee assignments automatically based on:")
         
-        # Display task completion metrics
-        st.markdown('<div class="sub-header">Task Completion</div>', unsafe_allow_html=True)
+        st.write("• **Employee expertise** in different type of tasks")
+        st.write("• **Dependencies between tasks** in the production process")
+        st.write("• **Product preferences** of each employee")
+        st.write("• **Dynamic assignment strategies** to maximize efficiency")
         
+        # Display summary statistics
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.metric("Total Tasks", completion_stats['total_tasks'])
-            
+            st.metric("Total Product(s)", len(products_df["Product"].unique()))
+        
         with col2:
-            st.metric("Completed Tasks", completion_stats['completed_tasks'])
-            
+            st.metric("Total Worker(s)", len(workers_df))
+        
         with col3:
-            st.metric("Completion Rate", f"{completion_stats['completion_percentage']:.1f}%")
+            st.metric("Total Type of Task(s)", len(products_df))
         
-        # Task completion by product
-        st.markdown("#### Tasks by Product")
+        st.subheader("Main Features")
         
-        product_cols = st.columns(len(product_quantities))
-        for i, (product, count) in enumerate(completion_stats['tasks_by_product'].items()):
-            with product_cols[i % len(product_cols)]:
-                total_product_tasks = sum(1 for task in products_df[products_df['Product'] == product]) * product_quantities[product]
-                completion = (count / total_product_tasks) * 100 if total_product_tasks > 0 else 0
-                st.metric(product, f"{count}/{total_product_tasks}", f"{completion:.1f}%")
+        st.write("📊 **Product and Worker Database**: View and manage master data")
+        st.write("🎯 **Production Order**: Create and manage production orders")
+        st.write("📈 **Real-Time Analysis**: View assignment results and performance statistics")
+        st.write("🔄 **Dynamic Assignment**: Employees can switch tasks optimally")
+    
+    elif page == "Product Database":
+        st.header("📦 Product Database")
+        st.dataframe(products_df, use_container_width=True)
+    
+    elif page == "Worker Database":
+        st.header("👥 Worker Database")
+        st.dataframe(workers_df, use_container_width=True)
+    
+    elif page == "Production Order":
+        st.header("🎯 Production Order")
         
-        # Worker assignment visualization
-        st.markdown('<div class="sub-header">Worker Assignments</div>', unsafe_allow_html=True)
+        # Product selection and quantity input
+        st.subheader("Make a Production Order")
         
-        # Create tabs for each day
-        day_tabs = st.tabs([f"Day {day}" for day in range(1, completion_stats['estimated_days'] + 1)])
+        col1, col2 = st.columns(2)
         
-        # Process each day
-        time_slots = generate_time_slots(8, 16)
-        
-        for day_idx, day_tab in enumerate(day_tabs):
-            day = day_idx + 1
+        with col1:
+            st.write("**Choose Product and Quantity:**")
             
-            with day_tab:
-                # Create a pivoted schedule table with workers as columns
-                # First, create a dictionary to store task information
-                worker_schedule = {}
-                
-                # Initialize with all time slots for each worker
-                for worker in worker_availability:
-                    worker_schedule[worker] = {slot: "" for slot in time_slots}
-                
-                # Fill in the tasks
-                for worker, slots in schedule[day].items():
-                    for slot, task in slots.items():
-                        if task is not None:
-                            # Create a formatted task string with product and task info
-                            task_info = f"{task['task_id']} - {task['task'].split(' - ')[-1] if ' - ' in task['task'] else task['task']}" 
-                            worker_schedule[worker][slot] = task_info
-                
-                # Create a DataFrame with time slots as rows and workers as columns
-                schedule_table = pd.DataFrame({
-                    'Time': time_slots
-                })
-                
-                # Add a column for each worker
-                for worker in worker_availability:
-                    schedule_table[worker] = schedule_table['Time'].map(worker_schedule[worker])
-                
-                # Set Time as index to make it the first column
-                schedule_table = schedule_table.set_index('Time')
-                
-                # Display the table
-                st.markdown(f"### Day {day} Schedule")
-                st.dataframe(schedule_table, use_container_width=True)
-        
-        # Display detailed worker statistics
-        st.markdown('<div class="sub-header">Worker Performance</div>', unsafe_allow_html=True)
-        
-        # Create worker performance metrics
-        perf_data = []
-        for worker, stats in worker_stats.items():
-            if worker in worker_availability:
-                perf_data.append({
-                    'Worker': worker,
-                    'Tasks Completed': stats['total_tasks_completed'],
-                    'Products Worked': len(stats['completed_products']),
-                    'Skill Utilization (%)': stats['skill_utilization'] * 100,
-                    'Main Product': max(stats['time_spent_on_product'].items(), key=lambda x: x[1])[0] if stats['time_spent_on_product'] else "None"
-                })
-        
-        if perf_data:
-            perf_df = pd.DataFrame(perf_data)
+            products_to_produce = {}
+            unique_products = products_df["Product"].unique()
             
-            # Create a bar chart of tasks completed
-            tasks_chart = alt.Chart(perf_df).mark_bar().encode(
-                x=alt.X('Worker:N', sort='-y', title='Worker'),
-                y=alt.Y('Tasks Completed:Q', title='Tasks Completed'),
-                color=alt.Color('Skill Utilization (%):Q', scale=alt.Scale(scheme='greenblue')),
-                tooltip=['Worker', 'Tasks Completed', 'Products Worked', 'Skill Utilization (%)', 'Main Product']
-            ).properties(
-                width=600,
-                height=300,
-                title="Worker Task Completion"
+            for product in unique_products:
+                quantity = st.number_input(
+                    product, 
+                    min_value=0, 
+                    max_value=1000, 
+                    value=0, 
+                    step=1,
+                    key=f"qty_{product}"
+                )
+                if quantity > 0:
+                    products_to_produce[product] = quantity
+        
+        with col2:
+            st.write("**Choose Worker(s):**")
+            selected_workers = st.multiselect(
+                "Choose Worker(s)",
+                workers_df["Worker"].tolist(),
+                default=workers_df["Worker"].tolist()
             )
+        
+        # Order summary
+        if products_to_produce:
+            st.subheader("Order Summary")
             
-            st.altair_chart(tasks_chart, use_container_width=True)
+            for product, qty in products_to_produce.items():
+                st.write(f"• **{product}**: {qty} unit(s)")
             
-            # Also display the data as a table for clarity
-            st.subheader("Worker Performance Details")
-            st.dataframe(perf_df, use_container_width=True)
+            st.write(f"• **Available worker(s)**: {len(selected_workers)} person(s)")
             
-            # Create a download link for the schedule
-            schedule_export = []
-            for day in range(1, completion_stats['estimated_days'] + 1):
-                for worker, slots in schedule[day].items():
-                    for slot, task in slots.items():
-                        if task is not None:
-                            schedule_export.append({
-                                'Day': day,
-                                'Worker': worker,
-                                'Time': slot,
-                                'Product': task['product'],
-                                'Task': task['task'],
-                                'TaskID': task['task_id']
-                            })
-            
-            if schedule_export:
-                export_df = pd.DataFrame(schedule_export)
-                st.markdown(get_table_download_link(export_df, 'schedule.csv', 'Download Schedule CSV'), unsafe_allow_html=True)
+            # Run simulation button
+            if st.button("🚀 Run Simulation"):
+                if not selected_workers:
+                    st.error("Select at least one worker!")
+                else:
+                    with st.spinner("Running Simulation..."):
+                        available_workers_df = workers_df[workers_df["Worker"].isin(selected_workers)]
+                        
+                        result = assign_tasks(
+                            products_to_produce=products_to_produce,
+                            available_workers_df=available_workers_df,
+                            products_df=products_df,
+                            slot_duration_minutes=30
+                        )
+                        
+                        if result:
+                            display_simulation_results(result)
+    
+    elif page == "About":
+        st.header("About the System")
+        
+        st.write("**Task Auto-Assignment System** is an application designed to optimize employee assignments in the production process.")
+        
+        st.subheader("Key Features:")
+        st.write("• Auto-assignment based on skills")
+        st.write("• Dependency management between tasks")
+        st.write("• Real-time simulation")
+        st.write("• Worker performance analysis")
+        
+        st.subheader("Technology:")
+        st.write("• Python & Streamlit")
+        st.write("• Pandas for data manipulation")
+        st.write("• Assignment optimization algorithm")
 
-elif page == "About":
-    st.markdown('<div class="main-header">About</div>', unsafe_allow_html=True)
-    st.markdown("""
-    ### Task Auto-Assignment System
-    
-    This application is designed to optimize production scheduling by:
-    
-    - Automatically assigning tasks to workers based on their skills
-    - Prioritizing tasks with no dependencies first
-    - Minimizing task switching for workers
-    - Balancing workload across available workers
-    
-    The system calculates the estimated production days needed based on the total task volume and available workers.
-    """)
+if __name__ == "__main__":
+    main()
+
